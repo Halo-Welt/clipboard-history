@@ -1,6 +1,6 @@
 # Clipboard History · 剪贴板历史
 
-> 一个仿 Paste 风格的 macOS 剪贴板历史 App，毛玻璃 + 横向卡片墙。已打包成原生 `.app`，**不需要终端常驻**。
+> 一个为自己日常使用而做的 macOS 剪贴板历史小工具。已打包成原生 `.app`，**不需要终端常驻**。
 
 ![macOS](https://img.shields.io/badge/macOS-arm64-blue)
 ![Electron](https://img.shields.io/badge/Electron-28-47848F)
@@ -108,7 +108,7 @@ npm start
 .
 ├── main.js          # 主进程：快捷键、剪贴板监听、自启动、托盘
 ├── preload.js       # 预加载脚本（contextBridge）
-├── index.html       # 渲染层入口
+├── index.html       # 渲染层入口（窗口加载的 HTML）
 ├── styles.css       # 毛玻璃 + 卡片样式
 ├── renderer.js      # 渲染层逻辑（搜索、键盘、卡片渲染）
 ├── build/
@@ -132,6 +132,10 @@ npm run package      # 打包生成 .app（输出到 dist/）
 - macOS vibrancy + `LSUIElement`（无 Dock 图标）
 - 本地 JSON 持久化（`app.getPath('userData')`）
 - `app.setLoginItemSettings` 实现开机自启
+
+## 📝 说明
+
+本仓库是作者为自用而开发的 macOS 小工具，仅供个人学习与日常使用。代码以 MIT 协议开源，欢迎自行编译使用，但请勿将构建产物用于商业分发。
 
 ## 📜 License
 

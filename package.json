@@ -1,7 +1,7 @@
 {
   "name": "clipboard-history",
   "version": "1.0.0",
-  "description": "A Paste-like clipboard history app for macOS",
+  "description": "A personal clipboard history tool for macOS",
   "main": "main.js",
   "scripts": {
     "start": "electron .",

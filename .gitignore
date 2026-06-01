@@ -4,6 +4,7 @@ node_modules/
 # Build output
 dist/
 out/
+*.zip
 
 # Logs
 *.log
@@ -29,4 +30,3 @@ clipboard-history.json
 build/icon.iconset/
 build/icon_1024.png
 build/make_icon.py
-build/Info.plist.json

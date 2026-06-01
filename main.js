@@ -184,7 +184,7 @@ function createTray() {
         type: 'info',
         title: '关于',
         message: 'ClipboardHistory · 剪贴板历史',
-        detail: '快捷键 ⇧⌘V 呼出\n仿 Paste 风格 · 由 liuxinyu 构建'
+        detail: '一个自用的 macOS 剪贴板小工具\n快捷键 ⇧⌘V 呼出'
       });
     }},
     { label: '退出', click: () => app.quit() }
