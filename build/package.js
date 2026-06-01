@@ -14,7 +14,7 @@ const path = require('path');
       icon: __dirname + '/icon',
       overwrite: true,
       appBundleId: 'com.liuxinyu.clipboard-history',
-      appVersion: '1.1.0',
+      appVersion: '1.2.0',
       appCategoryType: 'public.app-category.productivity',
       extendInfo: {
         LSUIElement: true,
