@@ -1,0 +1,260 @@
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+html, body {
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", "Helvetica Neue", sans-serif;
+  background: transparent;
+  color: #fff;
+}
+
+.container {
+  width: 100%;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  background: rgba(20, 20, 22, 0.55);
+  backdrop-filter: blur(40px) saturate(180%);
+  -webkit-backdrop-filter: blur(40px) saturate(180%);
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+/* 顶部栏 */
+.topbar {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 10px 20px;
+  height: 44px;
+  flex-shrink: 0;
+}
+
+.search-wrap {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  background: rgba(255, 255, 255, 0.08);
+  border-radius: 6px;
+  padding: 5px 10px;
+  width: 220px;
+  height: 26px;
+}
+
+.search-icon {
+  color: rgba(255, 255, 255, 0.5);
+  flex-shrink: 0;
+}
+
+#searchInput {
+  background: transparent;
+  border: none;
+  outline: none;
+  color: #fff;
+  font-size: 12px;
+  width: 100%;
+  -webkit-user-select: text;
+  user-select: text;
+}
+
+#searchInput::placeholder {
+  color: rgba(255, 255, 255, 0.4);
+}
+
+.tabs {
+  display: flex;
+  gap: 8px;
+  flex: 1;
+  justify-content: center;
+}
+
+.tab {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 14px;
+  background: rgba(255, 255, 255, 0.08);
+  border-radius: 14px;
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+}
+
+.tab.active {
+  background: rgba(255, 255, 255, 0.18);
+}
+
+.tab .dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: #ff5d5b;
+}
+
+.actions button {
+  background: rgba(255, 255, 255, 0.08);
+  border: none;
+  color: #fff;
+  font-size: 12px;
+  padding: 5px 10px;
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.actions button:hover {
+  background: rgba(255, 255, 255, 0.15);
+}
+
+/* 卡片列表 */
+.card-list {
+  flex: 1;
+  display: flex;
+  gap: 14px;
+  padding: 8px 20px 16px 20px;
+  overflow-x: auto;
+  overflow-y: hidden;
+  scroll-behavior: smooth;
+}
+
+.card-list::-webkit-scrollbar {
+  height: 0;
+}
+
+.card {
+  flex-shrink: 0;
+  width: 200px;
+  height: 100%;
+  background: rgba(255, 255, 255, 0.92);
+  color: #1d1d1f;
+  border-radius: 10px;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  cursor: pointer;
+  transition: transform 0.12s ease, box-shadow 0.12s ease, outline 0.1s ease;
+  position: relative;
+  outline: 0px solid transparent;
+}
+
+.card:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 8px 20px rgba(0, 0, 0, 0.25);
+}
+
+.card.selected {
+  outline: 3px solid #2f7eff;
+  outline-offset: 1px;
+  transform: translateY(-2px);
+  box-shadow: 0 8px 24px rgba(47, 126, 255, 0.4);
+}
+
+.card-header {
+  padding: 8px 12px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  background: linear-gradient(135deg, #ffb344, #ff8a3d);
+  color: #fff;
+  font-size: 11px;
+}
+
+.card.type-image .card-header {
+  background: linear-gradient(135deg, #6dc6ff, #4a90ff);
+}
+
+.card.type-link .card-header {
+  background: linear-gradient(135deg, #b89cff, #7d6cff);
+}
+
+.card-header .title {
+  font-weight: 600;
+  font-size: 12px;
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.card-header .time {
+  font-size: 10px;
+  opacity: 0.85;
+}
+
+.card-body {
+  flex: 1;
+  padding: 10px 12px;
+  font-size: 12px;
+  line-height: 1.45;
+  overflow: hidden;
+  word-break: break-all;
+  display: -webkit-box;
+  -webkit-line-clamp: 9;
+  -webkit-box-orient: vertical;
+  -webkit-user-select: text;
+  user-select: text;
+  color: #2c2c2e;
+}
+
+.card.type-image .card-body {
+  padding: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: #f0f0f0;
+}
+
+.card.type-image .card-body img {
+  max-width: 100%;
+  max-height: 100%;
+  object-fit: contain;
+}
+
+.card-footer {
+  padding: 6px 12px;
+  font-size: 10px;
+  color: #999;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  border-top: 1px solid rgba(0, 0, 0, 0.05);
+  background: rgba(255, 255, 255, 0.5);
+}
+
+.card-index {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+}
+
+/* 空状态 */
+.empty {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: rgba(255, 255, 255, 0.4);
+  font-size: 13px;
+  width: 100%;
+}
+
+/* 底部 */
+.footer {
+  display: flex;
+  gap: 18px;
+  align-items: center;
+  padding: 6px 20px 8px 20px;
+  font-size: 10px;
+  color: rgba(255, 255, 255, 0.45);
+  border-top: 1px solid rgba(255, 255, 255, 0.05);
+  flex-shrink: 0;
+}
+
+.footer .hint.right {
+  margin-left: auto;
+}
