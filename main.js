@@ -505,12 +505,22 @@ echo "[$(date)] update done"
 }
 
 // ============ 托盘 ============
-function createTray() {
-  const icon = nativeImage.createEmpty();
-  tray = new Tray(icon);
+function getTrayIcon() {
+  // 加载真实图标（@2x @3x 由 nativeImage 自动选择，文件名匹配）
+  const iconPath = path.join(__dirname, 'assets', 'trayTemplate.png');
+  let img = nativeImage.createFromPath(iconPath);
+  if (img.isEmpty()) {
+    img = nativeImage.createEmpty();
+  }
   if (process.platform === 'darwin') {
-    tray.setTitle('📋');
-  } else {
+    img.setTemplateImage(true);
+  }
+  return img;
+}
+
+function createTray() {
+  tray = new Tray(getTrayIcon());
+  if (process.platform !== 'darwin') {
     tray.setToolTip('剪贴板历史');
   }
   rebuildTrayMenu();
@@ -520,9 +530,9 @@ function rebuildTrayMenu() {
   if (!tray) return;
   const isAutoStart = app.getLoginItemSettings().openAtLogin;
 
-  // ⭐ 有待更新版本时，菜单栏标题加红点（系统不允许彩色，用 emoji 模拟）
+  // 有待更新时：tray title 加红点提示（图标右侧附加文字 ·）
   if (process.platform === 'darwin') {
-    tray.setTitle(pendingUpdate ? '📋·' : '📋');
+    tray.setTitle(pendingUpdate ? ' ·' : '');
   }
 
   const items = [];
