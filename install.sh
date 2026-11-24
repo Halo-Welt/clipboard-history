@@ -2,8 +2,9 @@
 # 安装 ClipboardHistory.app 到 /Applications
 set -e
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-APP_SRC="$SCRIPT_DIR/dist/ClipboardHistory-darwin-arm64/ClipboardHistory.app"
-APP_DST="/Applications/ClipboardHistory.app"
+APP_SRC="$SCRIPT_DIR/dist/Clipboard-darwin-arm64/Clipboard.app"
+APP_DST="/Applications/Clipboard.app"
+LEGACY_DST="/Applications/ClipboardHistory.app"
 
 if [ ! -d "$APP_SRC" ]; then
   echo "✗ 应用未打包，先运行 npm run package"
@@ -11,10 +12,15 @@ if [ ! -d "$APP_SRC" ]; then
 fi
 
 # 关闭已运行的进程（只匹配本应用的二进制，避免误杀编辑器等含同名关键字的进程）
-pkill -f "$APP_DST/Contents/MacOS/ClipboardHistory" 2>/dev/null || true
+pkill -f "$APP_DST/Contents/MacOS/Clipboard" 2>/dev/null || true
+pkill -f "$LEGACY_DST/Contents/MacOS/ClipboardHistory" 2>/dev/null || true
 sleep 1
 
-# 移除旧版本
+# 移除旧版本（含改名前的 ClipboardHistory.app）
+if [ -d "$LEGACY_DST" ]; then
+  echo "→ 移除旧版本（改名前的 ClipboardHistory）..."
+  rm -rf "$LEGACY_DST"
+fi
 if [ -d "$APP_DST" ]; then
   echo "→ 移除旧版本..."
   rm -rf "$APP_DST"
@@ -32,7 +38,7 @@ echo "✓ 安装完成！"
 echo "  路径：$APP_DST"
 echo ""
 echo "下一步："
-echo "  1. 在 Launchpad 或 Applications 里双击启动 ClipboardHistory"
+echo "  1. 在 Launchpad 或 Applications 里双击启动 Clipboard"
 echo "  2. 首次启动会弹出辅助功能权限请求，请到「系统设置 → 隐私与安全性 → 辅助功能」打钩"
 echo "  3. 启动后按 ⇧⌘V 呼出剪贴板历史"
 echo "  4. 想开机自启：点击菜单栏的 📋 → 勾选「开机自启动」"

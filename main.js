@@ -10,6 +10,47 @@ const HISTORY_VERSION = 2;
 const MAX_HISTORY = 200;
 const MAX_TEXT_BYTES = 2 * 1024 * 1024; // 单条文本上限 2MB，超出部分截断
 const THUMB_MAX = 480;                  // 缩略图最长边
+// 从旧名字（package.json 的 name: clipboard-history）迁移 userData，
+// 否则改名后历史记录看起来"消失"了。
+function migrateLegacyUserData() {
+  try {
+    const legacy = path.join(app.getPath('appData'), 'clipboard-history');
+    const target = app.getPath('userData');
+    if (path.resolve(legacy) === path.resolve(target)) return;
+    if (!fs.existsSync(legacy)) return;
+
+    const targetImages = path.join(target, 'images');
+    const targetHasImages = fs.existsSync(targetImages) && fs.readdirSync(targetImages).length > 0;
+    if (fs.existsSync(path.join(target, 'clipboard-history.json')) || targetHasImages) return;
+
+    fs.mkdirSync(target, { recursive: true });
+
+    for (const file of ['clipboard-history.json', 'clipboard-history.json.bak']) {
+      const src = path.join(legacy, file);
+      if (!fs.existsSync(src)) continue;
+      try { fs.copyFileSync(src, path.join(target, file)); } catch (_) {}
+    }
+
+    const legacyImages = path.join(legacy, 'images');
+    if (fs.existsSync(legacyImages)) {
+      fs.mkdirSync(targetImages, { recursive: true });
+      for (const file of fs.readdirSync(legacyImages)) {
+        if (file.startsWith('.')) continue;
+        try { fs.copyFileSync(path.join(legacyImages, file), path.join(targetImages, file)); } catch (_) {}
+      }
+    }
+    console.log('[migrate] legacy userData copied to', target);
+  } catch (e) {
+    console.error('legacy userData migration failed:', e.message);
+  }
+}
+
+function migrateLegacyUserDataOnce() {
+  if (migrateLegacyUserData.done) return;
+  migrateLegacyUserData.done = true;
+  migrateLegacyUserData();
+}
+
 const IMAGE_SCHEME = 'ch-image';
 const POLL_INTERVAL = 700;
 const GITHUB_REPO = 'Halo-Welt/clipboard-history';
@@ -310,7 +351,7 @@ function captureFrontmostApp(callback) {
     (err, stdout) => {
       if (!err) {
         const name = String(stdout || '').trim();
-        if (name && name !== 'ClipboardHistory' && name !== 'Electron') {
+        if (name && name !== 'Clipboard' && name !== 'Electron') {
           previousAppName = name;
         }
       }
@@ -449,7 +490,7 @@ function fetchLatestRelease() {
       hostname: 'api.github.com',
       path: `/repos/${GITHUB_REPO}/releases/latest`,
       headers: {
-        'User-Agent': 'ClipboardHistory-Updater',
+        'User-Agent': 'Clipboard-Updater',
         'Accept': 'application/vnd.github+json'
       },
       timeout: 8000
@@ -505,7 +546,7 @@ async function checkForUpdates(silent = false) {
       // 手动触发的「检查更新...」：静态系统通知（toast 风格，右上角飞过）
       if (Notification.isSupported()) {
         const n = new Notification({
-          title: '剪贴板历史 · 发现新版本',
+          title: 'Clipboard · 发现新版本',
           body: `${CURRENT_VERSION} → ${latestVersion}    点击菜单栏 📋 → 立即更新到 v${latestVersion}`,
           silent: false
         });
@@ -519,7 +560,7 @@ async function checkForUpdates(silent = false) {
         // 手动检查时显示一条 toast 通知，不弹对话框
         if (Notification.isSupported()) {
           const n = new Notification({
-            title: '剪贴板历史 · 已是最新版本',
+            title: 'Clipboard · 已是最新版本',
             body: `当前 v${CURRENT_VERSION}`,
             silent: false
           });
@@ -531,7 +572,7 @@ async function checkForUpdates(silent = false) {
   } catch (e) {
     if (!silent && Notification.isSupported()) {
       const n = new Notification({
-        title: '剪贴板历史 · 检查更新失败',
+        title: 'Clipboard · 检查更新失败',
         body: '无法连接到 GitHub，请稍后重试',
         silent: true
       });
@@ -571,7 +612,7 @@ function createProgressWindow() {
       .fill { height: 100%; width: 0%; background: linear-gradient(90deg,#5f7dff,#a76cff); transition: width .15s; }
       .pct { font-size: 11px; opacity: 0.6; margin-top: 8px; text-align: right; }
     </style></head><body>
-      <h2>正在更新 ClipboardHistory</h2>
+      <h2>正在更新 Clipboard</h2>
       <div class="status" id="status">准备中...</div>
       <div class="bar"><div class="fill" id="fill"></div></div>
       <div class="pct" id="pct">0%</div>
@@ -602,7 +643,7 @@ function downloadFile(url, destPath, onProgress) {
       const opts = {
         hostname: u.hostname,
         path: u.pathname + u.search,
-        headers: { 'User-Agent': 'ClipboardHistory-Updater', 'Accept': 'application/octet-stream' }
+        headers: { 'User-Agent': 'Clipboard-Updater', 'Accept': 'application/octet-stream' }
       };
       const req = https.get(opts, (res) => {
         if ([301, 302, 303, 307, 308].includes(res.statusCode)) {
@@ -633,7 +674,7 @@ function downloadFile(url, destPath, onProgress) {
 }
 
 async function performUpdate(zipUrl, newVersion) {
-  const tmpDir = path.join(app.getPath('temp'), `clipboardhistory-update-${Date.now()}`);
+  const tmpDir = path.join(app.getPath('temp'), `clipboard-update-${Date.now()}`);
   const zipPath = path.join(tmpDir, 'update.zip');
   const extractDir = path.join(tmpDir, 'extracted');
   fs.mkdirSync(tmpDir, { recursive: true });
@@ -661,19 +702,20 @@ async function performUpdate(zipUrl, newVersion) {
       });
     });
 
-    // 找到解压出的 .app
-    const newAppPath = path.join(extractDir, 'ClipboardHistory.app');
-    if (!fs.existsSync(newAppPath)) {
-      throw new Error('解压后未找到 ClipboardHistory.app');
+    // 找到解压出的 .app（不写死包名，随 app 名字变化）
+    const appName = fs.readdirSync(extractDir).find(name => name.endsWith('.app'));
+    if (!appName) {
+      throw new Error('解压后未找到 .app');
     }
+    const newAppPath = path.join(extractDir, appName);
 
     // 3. 移除 quarantine 标记
     updateProgress('准备替换...', 80);
     try { execSync(`/usr/bin/xattr -cr "${newAppPath}"`); } catch (e) {}
 
     // 4. 计算当前 .app 路径（从 main 进程的可执行文件反推）
-    // app.getAppPath() => /Applications/ClipboardHistory.app/Contents/Resources/app.asar
-    // process.execPath => /Applications/ClipboardHistory.app/Contents/MacOS/ClipboardHistory
+    // app.getAppPath() => /Applications/Clipboard.app/Contents/Resources/app.asar
+    // process.execPath => /Applications/Clipboard.app/Contents/MacOS/Clipboard
     const currentAppPath = path.dirname(path.dirname(path.dirname(process.execPath))); // .app 根目录
 
     if (!currentAppPath.endsWith('.app')) {
@@ -706,7 +748,7 @@ echo "replacing app: ${currentAppPath}"
 /usr/bin/ditto "${newAppPath}" "${currentAppPath}.new"
 
 # 原子替换：先把旧的搬到 trash 临时目录
-TRASH_DIR="/tmp/clipboardhistory-old-$(date +%s)"
+TRASH_DIR="/tmp/clipboard-old-$(date +%s)"
 mv "${currentAppPath}" "$TRASH_DIR" || true
 mv "${currentAppPath}.new" "${currentAppPath}"
 rm -rf "$TRASH_DIR" || true
@@ -744,7 +786,7 @@ echo "[$(date)] update done"
     if (progressWindow && !progressWindow.isDestroyed()) progressWindow.destroy();
     if (Notification.isSupported()) {
       const n = new Notification({
-        title: '剪贴板历史 · 更新失败',
+        title: 'Clipboard · 更新失败',
         body: e.message + '  点击查看详情',
         silent: false
       });
@@ -773,7 +815,7 @@ function getTrayIcon() {
 function createTray() {
   tray = new Tray(getTrayIcon());
   if (process.platform !== 'darwin') {
-    tray.setToolTip('剪贴板历史');
+    tray.setToolTip('Clipboard');
   }
   rebuildTrayMenu();
 }
@@ -813,7 +855,7 @@ function rebuildTrayMenu() {
   }
 
   items.push(
-    { label: '显示剪贴板历史 (⇧⌘V)', click: () => showWindow() },
+    { label: '显示 Clipboard (⇧⌘V)', click: () => showWindow() },
     { label: '清空历史', click: () => {
       store.clear();
       sendHistory();
@@ -830,11 +872,11 @@ function rebuildTrayMenu() {
     { label: '检查更新...', click: () => checkForUpdates(false) },
     { type: 'separator' },
     { label: `当前版本：v${CURRENT_VERSION}`, enabled: false },
-    { label: '关于 ClipboardHistory', click: () => {
+    { label: '关于 Clipboard', click: () => {
       dialog.showMessageBox({
         type: 'info',
         title: '关于',
-        message: 'ClipboardHistory · 剪贴板历史',
+        message: 'Clipboard · 剪贴板历史',
         detail: `版本：v${CURRENT_VERSION}\n一个自用的 macOS 剪贴板小工具\n快捷键 ⇧⌘V 呼出`
       });
     }},
@@ -864,6 +906,7 @@ function setupImageProtocol() {
 }
 
 async function initApp() {
+  migrateLegacyUserDataOnce();
   store.init();
   setupImageProtocol();
 

@@ -1,6 +1,6 @@
-# Clipboard History · 剪贴板历史
+# Clipboard · 剪贴板历史
 
-> 一个为自己日常使用而做的 macOS 剪贴板历史小工具。已打包成原生 `.app`，**不需要终端常驻**。
+> **Clipboard** —— 一个为自己日常使用而做的 macOS 剪贴板历史小工具。已打包成原生 `.app`，**不需要终端常驻**。
 
 ![macOS](https://img.shields.io/badge/macOS-arm64-blue)
 ![Electron](https://img.shields.io/badge/Electron-28-47848F)
@@ -23,20 +23,20 @@
 
 ### 方式一：下载 Release（最简单，推荐）
 
-前往 [Releases 页面](https://github.com/Halo-Welt/clipboard-history/releases) 下载最新的 `ClipboardHistory-arm64.zip`：
+前往 [Releases 页面](https://github.com/Halo-Welt/clipboard-history/releases) 下载最新的 `Clipboard-arm64.zip`：
 
 ```bash
 # 解压
-unzip ClipboardHistory-arm64.zip
+unzip Clipboard-arm64.zip
 
 # 移动到应用程序文件夹
-mv ClipboardHistory.app /Applications/
+mv Clipboard.app /Applications/
 
 # 移除 quarantine 标记（让未签名 App 可以直接打开）
-xattr -cr /Applications/ClipboardHistory.app
+xattr -cr /Applications/Clipboard.app
 
 # 启动
-open /Applications/ClipboardHistory.app
+open /Applications/Clipboard.app
 ```
 
 > ⚠️ 当前 Release 仅提供 **Apple Silicon (arm64)** 架构。Intel Mac 用户请使用方式二自行编译。
@@ -59,7 +59,7 @@ npm run package
 ```
 
 `install.sh` 会自动：
-1. 把 `ClipboardHistory.app` 拷贝到 `/Applications/`
+1. 把 `Clipboard.app` 拷贝到 `/Applications/`（并清理改名前的 `ClipboardHistory.app`）
 2. 移除 quarantine 标记，避免「无法验证开发者」拦截
 3. 询问是否立即启动
 
@@ -77,11 +77,11 @@ npm start
 ## 🔑 首次启动注意事项
 
 1. **辅助功能权限**：模拟 ⌘V 自动粘贴需要"辅助功能"权限。
-   - 系统设置 → 隐私与安全性 → 辅助功能 → 把 **ClipboardHistory** 打钩
+   - 系统设置 → 隐私与安全性 → 辅助功能 → 把 **Clipboard** 打钩
    - 没打钩的话，点击卡片只会复制到剪贴板，不会自动粘贴到目标 App
 2. **未签名应用**：本应用没有 Apple 开发者签名，第一次双击若提示"无法验证开发者"，请：
    - 右键应用 → 选择"打开" → 弹窗中点"打开"
-   - 或运行 `xattr -cr /Applications/ClipboardHistory.app`（`install.sh` 已自动处理）
+   - 或运行 `xattr -cr /Applications/Clipboard.app`（`install.sh` 已自动处理）
 
 ## ⌨️ 操作快捷键
 
@@ -100,7 +100,7 @@ npm start
 
 ## 🍎 菜单栏（点击 📋）
 
-- 显示剪贴板历史 (⇧⌘V)
+- 显示 Clipboard (⇧⌘V)
 - 清空历史
 - ☐ 开机自启动
 - 检查更新...
@@ -145,8 +145,10 @@ npm start
 ├── index.html       # 渲染层入口（窗口加载的 HTML）
 ├── styles.css       # 毛玻璃 + 卡片样式
 ├── renderer.js      # 渲染层逻辑（搜索、键盘、卡片渲染）
+├── assets/         # 菜单栏 template 图标（16/32/48px）
+├── docs/           # 外观截图
 ├── build/
-│   ├── icon.icns    # 应用图标
+│   ├── icon.icns    # 应用图标（深色圆角方 + 卡片图形）
 │   └── package.js   # 打包脚本（@electron/packager）
 └── install.sh       # 一键安装到 /Applications
 ```
@@ -166,7 +168,7 @@ npm run package      # 打包生成 .app（输出到 dist/）
 - [Electron 28](https://www.electronjs.org/) — Chromium + Node 跨平台框架
 - [@electron/packager](https://github.com/electron/packager) — 打包工具
 - macOS vibrancy + `LSUIElement`（无 Dock 图标）
-- 本地持久化：`userData/clipboard-history.json` 存元数据，`userData/images/` 存原图与 480px 缩略图（自定义 `ch-image://` 协议按需加载缩略图，不再把 base64 塞进 JSON）
+- 本地持久化：`~/Library/Application Support/Clipboard/clipboard-history.json` 存元数据，同目录 `images/` 存原图与 480px 缩略图（自定义 `ch-image://` 协议按需加载缩略图，不再把 base64 塞进 JSON）
 - `app.setLoginItemSettings` 实现开机自启
 
 ## 🖼 外观

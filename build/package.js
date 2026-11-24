@@ -8,18 +8,18 @@ const path = require('path');
     const appPaths = await packager({
       dir: __dirname + '/..',
       out: __dirname + '/../dist',
-      name: 'ClipboardHistory',
+      name: 'Clipboard',
       platform: 'darwin',
       arch: 'arm64',
       icon: path.join(__dirname, 'icon.icns'),
       overwrite: true,
       appBundleId: 'com.liuxinyu.clipboard-history',
-      appVersion: '1.2.1',
+      appVersion: require('../package.json').version,
       appCategoryType: 'public.app-category.productivity',
       extendInfo: {
         LSUIElement: true,
         NSHighResolutionCapable: true,
-        CFBundleDisplayName: 'ClipboardHistory',
+        CFBundleDisplayName: 'Clipboard',
         NSHumanReadableCopyright: 'Copyright © 2026 liuxinyu'
       },
       prune: true,
