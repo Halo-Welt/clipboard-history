@@ -1,65 +1,284 @@
-const { app, BrowserWindow, globalShortcut, clipboard, ipcMain, screen, nativeImage, Tray, Menu, shell, dialog, Notification } = require('electron');
+const { app, BrowserWindow, globalShortcut, clipboard, ipcMain, screen, nativeImage, Tray, Menu, shell, dialog, Notification, protocol } = require('electron');
 const path = require('path');
 const fs = require('fs');
-const { exec, execSync } = require('child_process');
+const crypto = require('crypto');
+const { exec } = require('child_process');
 const https = require('https');
 
-// ============ 简单的本地 JSON 存储 ============
-class SimpleStore {
+// ============ 常量 ============
+const HISTORY_VERSION = 2;
+const MAX_HISTORY = 200;
+const MAX_TEXT_BYTES = 2 * 1024 * 1024; // 单条文本上限 2MB，超出部分截断
+const THUMB_MAX = 480;                  // 缩略图最长边
+const IMAGE_SCHEME = 'ch-image';
+const POLL_INTERVAL = 700;
+const GITHUB_REPO = 'Halo-Welt/clipboard-history';
+const CURRENT_VERSION = app.getVersion();
+
+// 渲染进程通过 ch-image:// 读取缩略图，必须在 app ready 之前注册
+protocol.registerSchemesAsPrivileged([
+  { scheme: IMAGE_SCHEME, privileges: { standard: true, secure: true, supportFetchAPI: true } }
+]);
+
+// ============ 工具函数 ============
+function sha1(buf) {
+  return crypto.createHash('sha1').update(buf).digest('hex');
+}
+function hashText(text) {
+  return 't:' + sha1(Buffer.from(text, 'utf8')).slice(0, 32);
+}
+function newId() {
+  return crypto.randomUUID();
+}
+
+// ============ 本地存储：元数据 JSON + 图片独立文件 ============
+// v1 的问题：图片 base64 存在 JSON 里（且 content/preview 存两遍），
+// 每次变更全量同步写盘、写入非原子。v2 改为元数据 + 图片文件、原子写、可迁移。
+class Store {
   constructor() {
+    this.dir = null;
     this.filePath = null;
-    this.cache = { history: [], settings: {} };
+    this.imagesDir = null;
+    this.cache = { version: HISTORY_VERSION, history: [], settings: {} };
+    this.saveTimer = null;
   }
+
   init() {
-    const dir = app.getPath('userData');
-    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-    this.filePath = path.join(dir, 'clipboard-history.json');
-    try {
-      if (fs.existsSync(this.filePath)) {
-        this.cache = Object.assign({ history: [], settings: {} }, JSON.parse(fs.readFileSync(this.filePath, 'utf8')));
-      }
-    } catch (e) {
-      this.cache = { history: [], settings: {} };
+    this.dir = app.getPath('userData');
+    this.imagesDir = path.join(this.dir, 'images');
+    fs.mkdirSync(this.imagesDir, { recursive: true });
+    this.filePath = path.join(this.dir, 'clipboard-history.json');
+
+    const raw = this.readJSON(this.filePath) || this.readJSON(this.filePath + '.bak');
+    if (raw) {
+      this.cache = Object.assign({ version: HISTORY_VERSION, history: [], settings: {} }, raw);
+      if ((raw.version || 1) < HISTORY_VERSION) this.migrateFromV1();
     }
   }
+
+  readJSON(file) {
+    try {
+      return JSON.parse(fs.readFileSync(file, 'utf8'));
+    } catch (e) {
+      return null;
+    }
+  }
+
+  // v1 → v2：把 base64 dataURL 抽成 images/*.png，条目只留元数据
+  migrateFromV1() {
+    let migrated = 0;
+    const history = [];
+    for (const item of this.cache.history || []) {
+      if (item.type !== 'image') {
+        history.push(Object.assign({}, item, {
+          id: item.id || newId(),
+          hash: item.hash || hashText(item.content || '')
+        }));
+        continue;
+      }
+      const dataUrl = item.content || item.preview || '';
+      const m = /^data:image\/[a-z0-9+.-]+;base64,(.*)$/i.exec(dataUrl);
+      if (!m) continue;
+      try {
+        const buf = Buffer.from(m[1], 'base64');
+        const saved = saveImageFiles(buf);
+        if (!saved) continue;
+        migrated++;
+        history.push({
+          id: newId(),
+          type: 'image',
+          hash: sha1(buf),
+          timestamp: item.timestamp || Date.now(),
+          bytes: saved.bytes,
+          width: saved.width,
+          height: saved.height,
+          file: saved.file,
+          thumb: saved.thumb,
+          preview: `${saved.width} × ${saved.height}`
+        });
+      } catch (e) {
+        // 单条迁移失败不影响其它记录
+      }
+    }
+    this.cache.history = history;
+    this.cache.version = HISTORY_VERSION;
+    this.save(true);
+    if (migrated) console.log(`[store] migrated ${migrated} image(s) to v2`);
+  }
+
+  history() {
+    return this.cache.history;
+  }
+
+  find(id) {
+    return this.cache.history.find(x => x.id === id) || null;
+  }
+
+  // 同 hash 视为重复：挪到最前面并更新时间，不新增
+  add(item) {
+    const list = this.cache.history;
+    const idx = list.findIndex(x => x.hash && x.hash === item.hash && x.type === item.type);
+    if (idx >= 0) {
+      const [dup] = list.splice(idx, 1);
+      if (item.timestamp) dup.timestamp = item.timestamp;
+      list.unshift(dup);
+      this.save();
+      return dup;
+    }
+    list.unshift(item);
+    const overflow = list.length > MAX_HISTORY ? list.splice(MAX_HISTORY) : [];
+    overflow.forEach(x => this.dropFiles(x));
+    this.save();
+    return item;
+  }
+
+  remove(id) {
+    const list = this.cache.history;
+    const idx = list.findIndex(x => x.id === id);
+    if (idx < 0) return false;
+    const [item] = list.splice(idx, 1);
+    this.dropFiles(item);
+    this.save();
+    return true;
+  }
+
+  clear() {
+    this.cache.history.forEach(x => this.dropFiles(x));
+    this.cache.history = [];
+    this.save();
+  }
+
+  dropFiles(item) {
+    if (item.type !== 'image') return;
+    for (const name of [item.file, item.thumb]) {
+      if (!name) continue;
+      try {
+        fs.unlinkSync(path.join(this.imagesDir, name));
+      } catch (e) {
+        // 文件可能已经不在了
+      }
+    }
+  }
+
   get(key, def) {
     return this.cache[key] !== undefined ? this.cache[key] : def;
   }
+
   set(key, value) {
     this.cache[key] = value;
+    this.save();
+  }
+
+  // 合并 200ms 内的多次改动，避免频繁写盘
+  save(immediate = false) {
+    if (immediate) {
+      this.flush();
+      return;
+    }
+    if (this.saveTimer) return;
+    this.saveTimer = setTimeout(() => {
+      this.saveTimer = null;
+      this.flush();
+    }, 200);
+  }
+
+  // 原子写：先写 .tmp 再 rename，旧文件留一份 .bak
+  flush() {
+    if (!this.filePath) return;
+    if (this.saveTimer) {
+      clearTimeout(this.saveTimer);
+      this.saveTimer = null;
+    }
+    const tmp = this.filePath + '.tmp';
     try {
-      fs.writeFileSync(this.filePath, JSON.stringify(this.cache));
+      fs.writeFileSync(tmp, JSON.stringify(this.cache));
+      try {
+        fs.renameSync(this.filePath, this.filePath + '.bak');
+      } catch (e) {
+        // 第一次写入时没有旧文件
+      }
+      fs.renameSync(tmp, this.filePath);
     } catch (e) {
-      console.error('Store save error:', e);
+      console.error('[store] save failed:', e.message);
     }
   }
 }
 
-const store = new SimpleStore();
+const store = new Store();
 
+// 把图片 Buffer 写成 PNG + 缩略图，返回元数据
+function saveImageFiles(buf) {
+  const img = nativeImage.createFromBuffer(buf);
+  if (img.isEmpty()) return null;
+  const { width, height } = img.getSize();
+  if (!width || !height) return null;
+
+  const id = newId();
+  const file = `${id}.png`;
+  const thumb = `${id}.thumb.png`;
+  fs.writeFileSync(path.join(store.imagesDir, file), buf);
+
+  const scale = Math.min(1, THUMB_MAX / Math.max(width, height));
+  const tw = Math.max(1, Math.round(width * scale));
+  const th = Math.max(1, Math.round(height * scale));
+  const thumbImg = scale < 1 ? img.resize({ width: tw, height: th, quality: 'good' }) : img;
+  fs.writeFileSync(path.join(store.imagesDir, thumb), thumbImg.toPNG());
+
+  return { file, thumb, width, height, bytes: buf.length };
+}
+
+// 传给渲染进程的字段（不含 base64 大图）
+function publicItem(item) {
+  return {
+    id: item.id,
+    type: item.type,
+    timestamp: item.timestamp,
+    preview: item.preview || '',
+    content: item.type === 'text' ? (item.content || '') : undefined,
+    length: item.length || 0,
+    width: item.width || 0,
+    height: item.height || 0,
+    bytes: item.bytes || 0,
+    thumbUrl: item.thumb ? `${IMAGE_SCHEME}://img/${encodeURIComponent(item.thumb)}` : ''
+  };
+}
+
+// ============ 运行状态 ============
 let mainWindow = null;
 let tray = null;
-let lastClipboardText = '';
-let lastClipboardImage = '';
 let clipboardWatcher = null;
-let previousAppName = null; // 呼出前的目标 App 名称
-
-const MAX_HISTORY = 200;
-const GITHUB_REPO = 'Halo-Welt/clipboard-history';
-const CURRENT_VERSION = app.getVersion();
+let previousAppName = null;
+let lastTextHash = '';
+let lastImageHash = '';
 
 // ============ 窗口 ============
+function currentDisplay() {
+  return screen.getDisplayNearestPoint(screen.getCursorScreenPoint());
+}
+
+function positionWindow() {
+  if (!mainWindow) return;
+  const area = currentDisplay().workArea;
+  const [w, h] = mainWindow.getSize();
+  const width = Math.min(w, area.width - 16);
+  const x = Math.round(area.x + (area.width - width) / 2);
+  const y = Math.round(area.y + area.height - h - 10);
+  mainWindow.setBounds({ x, y, width, height: h });
+}
+
 function createWindow() {
-  const { width: screenWidth, height: screenHeight } = screen.getPrimaryDisplay().workAreaSize;
-  const winHeight = 320;
+  const area = currentDisplay().workArea;
+  const winWidth = Math.min(area.width - 16, 1180);
+  const winHeight = 300;
 
   mainWindow = new BrowserWindow({
-    width: screenWidth,
+    width: winWidth,
     height: winHeight,
-    x: 0,
-    y: screenHeight - winHeight + 25,
+    x: Math.round(area.x + (area.width - winWidth) / 2),
+    y: Math.round(area.y + area.height - winHeight - 10),
     frame: false,
     transparent: true,
+    backgroundColor: '#00000000',
     vibrancy: 'under-window',
     visualEffectState: 'active',
     alwaysOnTop: true,
@@ -67,9 +286,8 @@ function createWindow() {
     resizable: false,
     movable: false,
     show: false,
-    hasShadow: false,
-    // ⭐ 关键：让 Electron 主窗口不偷焦点 —— 但激活快捷键时仍可接收输入
-    // 我们通过 panel 风格控制，这样关闭后焦点回到原 App
+    hasShadow: true,
+    roundedCorners: true,
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
@@ -81,39 +299,42 @@ function createWindow() {
   mainWindow.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
 
   mainWindow.on('blur', () => {
-    if (mainWindow && mainWindow.isVisible()) {
-      hideWindow();
-    }
+    if (mainWindow && mainWindow.isVisible()) hideWindow();
   });
 }
 
-// ⭐ 获取当前最前台 App 的名称（用于粘贴前先把焦点切回去）
-function captureFrontmostApp() {
-  try {
-    const out = execSync(`osascript -e 'tell application "System Events" to name of first application process whose frontmost is true'`, { timeout: 500 }).toString().trim();
-    if (out && out !== 'ClipboardHistory' && out !== 'Electron') {
-      previousAppName = out;
-    }
-  } catch (e) {
-    // ignore
-  }
+// 记录呼出前的目标 App（异步执行，不阻塞主进程）
+function captureFrontmostApp(callback) {
+  exec(`osascript -e 'tell application "System Events" to name of first application process whose frontmost is true'`,
+    { timeout: 800 },
+    (err, stdout) => {
+      if (!err) {
+        const name = String(stdout || '').trim();
+        if (name && name !== 'ClipboardHistory' && name !== 'Electron') {
+          previousAppName = name;
+        }
+      }
+      if (callback) callback();
+    });
+}
+
+function sendHistory() {
+  if (!mainWindow || mainWindow.isDestroyed()) return;
+  mainWindow.webContents.send('clipboard-history', store.history().map(publicItem));
 }
 
 function showWindow() {
   if (!mainWindow) return;
-  // ⭐ 在显示窗口前，先捕获当前最前的 App
-  captureFrontmostApp();
-
-  const history = store.get('history', []);
-  mainWindow.webContents.send('clipboard-history', history);
+  positionWindow();
+  sendHistory();
   mainWindow.show();
   mainWindow.focus();
+  mainWindow.webContents.send('window-shown');
+  captureFrontmostApp();
 }
 
 function hideWindow() {
-  if (mainWindow) {
-    mainWindow.hide();
-  }
+  if (mainWindow) mainWindow.hide();
 }
 
 function toggleWindow() {
@@ -126,56 +347,87 @@ function toggleWindow() {
 }
 
 // ============ 历史记录 ============
-function addToHistory(item) {
-  let history = store.get('history', []);
-  history = history.filter(h => {
-    if (item.type === 'text' && h.type === 'text') return h.content !== item.content;
-    if (item.type === 'image' && h.type === 'image') return h.content !== item.content;
-    return true;
-  });
-  history.unshift(item);
-  if (history.length > MAX_HISTORY) {
-    history = history.slice(0, MAX_HISTORY);
-  }
-  store.set('history', history);
-  if (mainWindow && mainWindow.isVisible()) {
-    mainWindow.webContents.send('clipboard-history', history);
-  }
+function addTextItem(text) {
+  const truncated = Buffer.byteLength(text, 'utf8') > MAX_TEXT_BYTES;
+  const content = truncated
+    ? Buffer.from(text, 'utf8').subarray(0, MAX_TEXT_BYTES).toString('utf8')
+    : text;
+  const item = {
+    id: newId(),
+    type: 'text',
+    hash: hashText(content),
+    content,
+    preview: content.length > 200 ? content.slice(0, 200) : content,
+    timestamp: Date.now(),
+    length: text.length,
+    truncated
+  };
+  const added = store.add(item);
+  if (mainWindow && mainWindow.isVisible()) sendHistory();
+  return added;
 }
 
+function addImageItem(buf) {
+  const saved = saveImageFiles(buf);
+  if (!saved) return null;
+  const item = {
+    id: newId(),
+    type: 'image',
+    hash: sha1(buf),
+    timestamp: Date.now(),
+    bytes: saved.bytes,
+    width: saved.width,
+    height: saved.height,
+    file: saved.file,
+    thumb: saved.thumb,
+    preview: `${saved.width} × ${saved.height}`
+  };
+  const added = store.add(item);
+  if (mainWindow && mainWindow.isVisible()) sendHistory();
+  return added;
+}
+
+function clipboardHasImage(formats) {
+  return formats.some(f =>
+    f.startsWith('image/') || f === 'public.png' || f === 'public.tiff' || f === 'public.jpeg'
+  );
+}
+
+// 轮询策略：
+//   文本/格式读取几乎零成本，每个 tick 都读；
+//   图片只在「剪贴板里有图且文本没变化」时用 readBuffer 取原始 PNG 再算 hash，
+//   只有 hash 变了才解码（readImage+toDataURL 单次约 100ms，绝不能每 tick 调用）。
 function startClipboardWatcher() {
-  lastClipboardText = clipboard.readText();
-  const img = clipboard.readImage();
-  lastClipboardImage = img.isEmpty() ? '' : img.toDataURL();
+  // 启动时只记录当前文本，避免把调用前就在剪贴板里的文字当成"新复制"；
+  // 图片不做 seed：重复的图由 store.add 按 hash 去重并置顶，不会产生重复记录。
+  const seed = clipboard.readText();
+  lastTextHash = seed ? hashText(seed) : '';
 
   clipboardWatcher = setInterval(() => {
     try {
       const text = clipboard.readText();
-      const image = clipboard.readImage();
-      const imgData = image.isEmpty() ? '' : image.toDataURL();
+      const textHash = text ? hashText(text) : '';
 
-      if (imgData && imgData !== lastClipboardImage) {
-        lastClipboardImage = imgData;
-        addToHistory({
-          type: 'image',
-          content: imgData,
-          preview: imgData,
-          timestamp: Date.now()
-        });
-      } else if (text && text !== lastClipboardText) {
-        lastClipboardText = text;
-        addToHistory({
-          type: 'text',
-          content: text,
-          preview: text.length > 200 ? text.slice(0, 200) : text,
-          timestamp: Date.now(),
-          length: text.length
-        });
+      if (textHash && textHash !== lastTextHash) {
+        lastTextHash = textHash;
+        addTextItem(text);
+        return;
       }
+      if (textHash) return; // 有文本时不再检查图片，避免影响文本复制
+
+      const formats = clipboard.availableFormats() || [];
+      if (!clipboardHasImage(formats)) return;
+
+      const buf = clipboard.readBuffer('public.png');
+      if (!buf || !buf.length) return;
+      const hash = sha1(buf);
+      if (hash === lastImageHash) return;
+      lastImageHash = hash;
+      addImageItem(buf);
     } catch (e) {
       console.error('Clipboard watch error:', e);
     }
-  }, 800);
+  }, POLL_INTERVAL);
 }
 
 // ============ 自动更新检查 ============
@@ -563,8 +815,8 @@ function rebuildTrayMenu() {
   items.push(
     { label: '显示剪贴板历史 (⇧⌘V)', click: () => showWindow() },
     { label: '清空历史', click: () => {
-      store.set('history', []);
-      if (mainWindow) mainWindow.webContents.send('clipboard-history', []);
+      store.clear();
+      sendHistory();
     }},
     { type: 'separator' },
     {
@@ -593,8 +845,27 @@ function rebuildTrayMenu() {
 }
 
 // ============ 启动 ============
-app.whenReady().then(() => {
+function setupImageProtocol() {
+  protocol.handle(IMAGE_SCHEME, (request) => {
+    try {
+      const name = decodeURIComponent(new URL(request.url).pathname.replace(/^\/+/, ''));
+      const safe = path.basename(name);
+      if (!/^[A-Za-z0-9-]+(\.thumb)?\.png$/.test(safe)) {
+        return new Response('Bad request', { status: 400 });
+      }
+      const data = fs.readFileSync(path.join(store.imagesDir, safe));
+      return new Response(data, {
+        headers: { 'content-type': 'image/png', 'cache-control': 'no-store' }
+      });
+    } catch (e) {
+      return new Response('Not found', { status: 404 });
+    }
+  });
+}
+
+async function initApp() {
   store.init();
+  setupImageProtocol();
 
   if (process.platform === 'darwin' && app.dock) {
     try { app.dock.hide(); } catch (e) {}
@@ -604,66 +875,81 @@ app.whenReady().then(() => {
   try { createTray(); } catch (e) { console.error('Tray failed:', e); }
   startClipboardWatcher();
 
-  const ret = globalShortcut.register('Shift+Command+V', () => {
-    toggleWindow();
-  });
+  const ret = globalShortcut.register('Shift+Command+V', () => toggleWindow());
   if (!ret) console.error('快捷键注册失败');
 
-  // ⭐ 启动后 5s 静默检查更新
+  // 启动 5 秒后静默检查更新，之后每 6 小时一次
   setTimeout(() => checkForUpdates(true), 5000);
-  // 每 6 小时检查一次
   setInterval(() => checkForUpdates(true), 6 * 60 * 60 * 1000);
-});
+}
+
+// 只允许一个实例：两个实例会同时轮询剪贴板、同时写同一个历史文件
+const gotLock = app.requestSingleInstanceLock();
+if (!gotLock) {
+  app.quit();
+} else {
+  app.on('second-instance', () => showWindow());
+  app.whenReady().then(initApp);
+}
 
 // ============ IPC ============
-ipcMain.on('paste-item', (event, item) => {
-  // 1. 写入剪贴板
+function writeItemToClipboard(item) {
+  if (!item) return false;
   if (item.type === 'text') {
-    clipboard.writeText(item.content);
-    lastClipboardText = item.content;
-  } else if (item.type === 'image') {
-    const img = nativeImage.createFromDataURL(item.content);
-    clipboard.writeImage(img);
-    lastClipboardImage = item.content;
+    clipboard.writeText(item.content || '');
+    lastTextHash = item.hash || hashText(item.content || '');
+    return true;
   }
+  try {
+    const buf = fs.readFileSync(path.join(store.imagesDir, item.file));
+    const img = nativeImage.createFromBuffer(buf);
+    if (img.isEmpty()) return false;
+    clipboard.writeImage(img);
+    lastImageHash = item.hash || sha1(buf);
+    return true;
+  } catch (e) {
+    console.error('Image paste failed:', e.message);
+    return false;
+  }
+}
 
-  // 2. 隐藏自己的窗口
-  hideWindow();
-
-  // 3. ⭐ 关键修复：把焦点切回之前的 App，再发送 ⌘V
-  //    单纯 hide 不够，macOS 焦点不会自动回到上一个 App
+// 把焦点切回呼出前的 App，再发 ⌘V
+function pasteToPreviousApp() {
   const targetApp = previousAppName;
   setTimeout(() => {
-    if (targetApp) {
-      // 用 osascript activate 目标 App，然后立刻发 ⌘V
-      const script = `
-        tell application "${targetApp.replace(/"/g, '\\"')}" to activate
-        delay 0.05
-        tell application "System Events" to keystroke "v" using command down
-      `;
-      exec(`osascript -e '${script.replace(/'/g, "'\\''")}'`, (err) => {
-        if (err) {
-          // 兜底：直接发 ⌘V
-          exec(`osascript -e 'tell application "System Events" to keystroke "v" using command down'`);
-        }
-      });
-    } else {
-      // 没捕获到目标 App，直接发 ⌘V（可能粘贴到 Finder 等）
-      exec(`osascript -e 'tell application "System Events" to keystroke "v" using command down'`);
-    }
+    const quoted = targetApp ? targetApp.replace(/\\/g, '\\\\').replace(/"/g, '\\"') : '';
+    const script = targetApp
+      ? `tell application "${quoted}" to activate\ndelay 0.05\ntell application "System Events" to keystroke "v" using command down`
+      : `tell application "System Events" to keystroke "v" using command down`;
+    exec(`osascript -e '${script.replace(/'/g, "'\\''")}'`, (err) => {
+      if (err && targetApp) {
+        // 目标 App 名字无法 activate 时退回直接发送 ⌘V
+        exec(`osascript -e 'tell application "System Events" to keystroke "v" using command down'`);
+      }
+    });
   }, 80);
+}
+
+ipcMain.on('paste-item', (event, id) => {
+  const item = store.find(id);
+  if (!item) return;
+  if (!writeItemToClipboard(item)) return;
+  hideWindow();
+  pasteToPreviousApp();
 });
 
-ipcMain.on('delete-item', (event, timestamp) => {
-  let history = store.get('history', []);
-  history = history.filter(h => h.timestamp !== timestamp);
-  store.set('history', history);
-  if (mainWindow) mainWindow.webContents.send('clipboard-history', history);
+ipcMain.on('copy-item', (event, id) => {
+  const item = store.find(id);
+  if (item) writeItemToClipboard(item);
+});
+
+ipcMain.on('delete-item', (event, id) => {
+  if (store.remove(id)) sendHistory();
 });
 
 ipcMain.on('clear-history', () => {
-  store.set('history', []);
-  if (mainWindow) mainWindow.webContents.send('clipboard-history', []);
+  store.clear();
+  sendHistory();
 });
 
 ipcMain.on('hide-window', () => {
@@ -673,6 +959,7 @@ ipcMain.on('hide-window', () => {
 app.on('will-quit', () => {
   globalShortcut.unregisterAll();
   if (clipboardWatcher) clearInterval(clipboardWatcher);
+  store.flush();
 });
 
 app.on('window-all-closed', (e) => {

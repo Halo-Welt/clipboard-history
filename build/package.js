@@ -11,7 +11,7 @@ const path = require('path');
       name: 'ClipboardHistory',
       platform: 'darwin',
       arch: 'arm64',
-      icon: __dirname + '/icon',
+      icon: path.join(__dirname, 'icon.icns'),
       overwrite: true,
       appBundleId: 'com.liuxinyu.clipboard-history',
       appVersion: '1.2.1',

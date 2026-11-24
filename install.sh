@@ -10,8 +10,8 @@ if [ ! -d "$APP_SRC" ]; then
   exit 1
 fi
 
-# 关闭已运行的进程
-pkill -f "ClipboardHistory" 2>/dev/null || true
+# 关闭已运行的进程（只匹配本应用的二进制，避免误杀编辑器等含同名关键字的进程）
+pkill -f "$APP_DST/Contents/MacOS/ClipboardHistory" 2>/dev/null || true
 sleep 1
 
 # 移除旧版本
@@ -42,6 +42,7 @@ echo ""
 read -p "现在就启动应用？[Y/n] " ans
 ans=${ans:-Y}
 if [[ "$ans" =~ ^[Yy]$ ]]; then
-  open "$APP_DST"
+  # 避免把当前 shell 里的 ELECTRON_RUN_AS_NODE 等变量带进 Electron
+  env -u ELECTRON_RUN_AS_NODE open "$APP_DST"
   echo "✓ 已启动，按 ⇧⌘V 试试看"
 fi

@@ -1,22 +1,32 @@
-let history = [];
+let items = [];
 let filtered = [];
-let selectedIndex = 0;
+let selectedId = null;
 let searchKeyword = '';
+let pendingDeleteIndex = null;
 
 const cardList = document.getElementById('cardList');
 const searchInput = document.getElementById('searchInput');
 const clearBtn = document.getElementById('clearBtn');
+const statusEl = document.getElementById('status');
+
+const TYPE_LABEL = { text: '文本', link: '链接', image: '图片' };
 
 function formatTime(ts) {
-  const diff = Date.now() - ts;
+  const diff = Math.max(0, Date.now() - ts);
   const sec = Math.floor(diff / 1000);
-  if (sec < 60) return '刚刚';
+  if (sec < 45) return '刚刚';
   const min = Math.floor(sec / 60);
-  if (min < 60) return `${min} 分钟前`;
+  if (min < 60) return `${Math.max(1, min)} 分钟前`;
   const hour = Math.floor(min / 60);
   if (hour < 24) return `${hour} 小时前`;
-  const day = Math.floor(hour / 24);
-  return `${day} 天前`;
+  return `${Math.floor(hour / 24)} 天前`;
+}
+
+function formatBytes(n) {
+  if (!n) return '';
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${Math.round(n / 1024)} KB`;
+  return `${(n / 1024 / 1024).toFixed(1)} MB`;
 }
 
 function detectType(item) {
@@ -26,123 +36,206 @@ function detectType(item) {
   return 'text';
 }
 
-function getTitle(item) {
-  if (item.type === 'image') return '图片';
-  const sub = detectType(item);
-  if (sub === 'link') return '链接';
-  return '文本';
+function itemMeta(item) {
+  if (item.type === 'image') {
+    const size = item.width && item.height ? `${item.width}×${item.height}` : '图片';
+    const bytes = formatBytes(item.bytes);
+    return bytes ? `${size} · ${bytes}` : size;
+  }
+  return `${item.length || (item.content || '').length} 字符`;
 }
 
-function escapeHtml(s) {
-  return s.replace(/[&<>"']/g, ch => ({
-    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
-  })[ch]);
+function updateStatus() {
+  if (!statusEl) return;
+  if (searchKeyword) {
+    statusEl.textContent = `找到 ${filtered.length} 条`;
+  } else {
+    statusEl.textContent = items.length ? `共 ${items.length} 条` : '';
+  }
+}
+
+function buildCard(item, index) {
+  const type = detectType(item);
+  const card = document.createElement('div');
+  card.className = `card type-${type}`;
+  card.dataset.id = item.id;
+  if (item.id === selectedId) card.classList.add('selected');
+
+  const head = document.createElement('div');
+  head.className = 'card-head';
+  const badge = document.createElement('span');
+  badge.className = 'badge';
+  badge.textContent = TYPE_LABEL[type];
+  const time = document.createElement('span');
+  time.className = 'time';
+  time.dataset.ts = String(item.timestamp);
+  time.textContent = formatTime(item.timestamp);
+  head.append(badge, time);
+
+  const body = document.createElement('div');
+  body.className = 'card-body';
+  if (item.type === 'image' && item.thumbUrl) {
+    const img = document.createElement('img');
+    img.src = item.thumbUrl;
+    img.alt = '';
+    img.loading = 'lazy';
+    img.decoding = 'async';
+    body.appendChild(img);
+  } else {
+    body.textContent = item.preview || item.content || '';
+  }
+
+  const foot = document.createElement('div');
+  foot.className = 'card-foot';
+  const meta = document.createElement('span');
+  meta.textContent = itemMeta(item);
+  const idx = document.createElement('span');
+  idx.className = 'card-index';
+  idx.textContent = index < 9 ? `${index + 1}` : '';
+  foot.append(meta, idx);
+
+  card.append(head, body, foot);
+
+  card.addEventListener('click', () => {
+    selectedId = item.id;
+    window.clipAPI.pasteItem(item.id);
+  });
+  card.addEventListener('contextmenu', (e) => {
+    e.preventDefault();
+    removeItem(item.id);
+  });
+
+  return card;
 }
 
 function render() {
-  cardList.innerHTML = '';
+  cardList.textContent = '';
 
   if (filtered.length === 0) {
     const empty = document.createElement('div');
     empty.className = 'empty';
-    empty.textContent = searchKeyword ? '未找到匹配项' : '暂无剪贴板记录，复制一些内容试试吧 ✨';
+    const icon = document.createElement('div');
+    icon.className = 'empty-icon';
+    icon.textContent = searchKeyword ? '🔍' : '📋';
+    const text = document.createElement('div');
+    text.textContent = searchKeyword ? '没有匹配的内容' : '还没有剪贴板记录';
+    const hint = document.createElement('div');
+    hint.style.fontSize = '11px';
+    hint.style.opacity = '0.75';
+    hint.textContent = searchKeyword ? '换个关键词试试' : '复制一段文字或图片后会自动出现在这里';
+    empty.append(icon, text, hint);
     cardList.appendChild(empty);
+    updateStatus();
     return;
   }
 
-  filtered.forEach((item, i) => {
-    const sub = detectType(item);
-    const card = document.createElement('div');
-    card.className = `card type-${sub}`;
-    if (i === selectedIndex) card.classList.add('selected');
-    card.dataset.index = i;
+  const frag = document.createDocumentFragment();
+  filtered.forEach((item, i) => frag.appendChild(buildCard(item, i)));
+  cardList.appendChild(frag);
+  updateStatus();
+  scrollToSelected('auto');
+}
 
-    let bodyHtml = '';
-    if (item.type === 'image') {
-      bodyHtml = `<img src="${item.content}" />`;
-    } else {
-      bodyHtml = escapeHtml(item.preview || item.content || '');
-    }
+function scrollToSelected(behavior = 'smooth') {
+  const el = selectedId ? cardList.querySelector(`.card[data-id="${CSS.escape(selectedId)}"]`) : null;
+  if (el) el.scrollIntoView({ behavior, block: 'nearest', inline: 'nearest' });
+}
 
-    const charLen = item.type === 'text' ? `${item.length || (item.content || '').length} 个字符` : '图片';
-
-    card.innerHTML = `
-      <div class="card-header">
-        <span class="title">${getTitle(item)}</span>
-        <span class="time">${formatTime(item.timestamp)}</span>
-      </div>
-      <div class="card-body">${bodyHtml}</div>
-      <div class="card-footer">
-        <span>${charLen}</span>
-        <span class="card-index">≡ ${i + 1}</span>
-      </div>
-    `;
-
-    card.addEventListener('click', () => {
-      selectedIndex = i;
-      pasteSelected();
-    });
-
-    card.addEventListener('contextmenu', (e) => {
-      e.preventDefault();
-      window.clipAPI.deleteItem(item.timestamp);
-    });
-
-    cardList.appendChild(card);
-  });
-
-  // 滚动到选中项
-  const selected = cardList.querySelector('.card.selected');
-  if (selected) {
-    selected.scrollIntoView({ behavior: 'smooth', block: 'nearest', inline: 'center' });
+// 只切换选中样式，不重建列表（方向键连按时不再重排 DOM）
+function setSelection(id, { scroll = true } = {}) {
+  if (!id || id === selectedId) {
+    if (id && scroll) scrollToSelected();
+    return;
+  }
+  const prev = cardList.querySelector('.card.selected');
+  if (prev) prev.classList.remove('selected');
+  selectedId = id;
+  const next = cardList.querySelector(`.card[data-id="${CSS.escape(id)}"]`);
+  if (next) {
+    next.classList.add('selected');
+    if (scroll) next.scrollIntoView({ behavior: 'smooth', block: 'nearest', inline: 'nearest' });
   }
 }
 
-function applyFilter() {
-  if (!searchKeyword) {
-    filtered = history.slice();
-  } else {
-    const kw = searchKeyword.toLowerCase();
-    filtered = history.filter(h => {
-      if (h.type === 'image') return false;
-      return (h.content || '').toLowerCase().includes(kw);
-    });
+function applyFilter(preferredIndex) {
+  const kw = searchKeyword.trim().toLowerCase();
+  filtered = !kw
+    ? items.slice()
+    : items.filter(item => item.type !== 'image' && (item.content || '').toLowerCase().includes(kw));
+
+  if (!filtered.some(item => item.id === selectedId)) {
+    const idx = typeof preferredIndex === 'number'
+      ? Math.max(0, Math.min(preferredIndex, filtered.length - 1))
+      : 0;
+    selectedId = filtered[idx] ? filtered[idx].id : null;
   }
-  if (selectedIndex >= filtered.length) selectedIndex = Math.max(0, filtered.length - 1);
   render();
 }
 
+function moveSelection(delta) {
+  if (filtered.length === 0) return;
+  const current = filtered.findIndex(item => item.id === selectedId);
+  const next = Math.max(0, Math.min(filtered.length - 1, (current < 0 ? 0 : current) + delta));
+  setSelection(filtered[next].id);
+}
+
+function selectedItem() {
+  return filtered.find(item => item.id === selectedId) || null;
+}
+
 function pasteSelected() {
-  if (filtered.length === 0) return;
-  const item = filtered[selectedIndex];
-  if (!item) return;
-  window.clipAPI.pasteItem(item);
+  const item = selectedItem();
+  if (item) window.clipAPI.pasteItem(item.id);
 }
 
-function deleteSelected() {
-  if (filtered.length === 0) return;
-  const item = filtered[selectedIndex];
+function copySelected() {
+  const item = selectedItem();
   if (!item) return;
-  window.clipAPI.deleteItem(item.timestamp);
+  window.clipAPI.copyItem(item.id);
+  // 复制后停留 200ms 让用户看到反馈，再收起
+  setTimeout(() => window.clipAPI.hideWindow(), 220);
 }
 
+function removeItem(id) {
+  pendingDeleteIndex = filtered.findIndex(item => item.id === id);
+  window.clipAPI.deleteItem(id);
+}
+
+// ============ 主进程事件 ============
 window.clipAPI.onHistory((data) => {
-  history = data || [];
-  selectedIndex = 0;
+  items = Array.isArray(data) ? data : [];
+  applyFilter(pendingDeleteIndex);
+  pendingDeleteIndex = null;
+});
+
+window.clipAPI.onShown(() => {
+  searchKeyword = '';
+  searchInput.value = '';
+  selectedId = null;
+  pendingDeleteIndex = null;
   applyFilter();
 });
 
+// ============ 键盘 ============
 document.addEventListener('keydown', (e) => {
   if (e.key === 'Escape') {
+    e.preventDefault();
     window.clipAPI.hideWindow();
     return;
   }
 
-  if (document.activeElement === searchInput) {
-    if (e.key === 'ArrowDown' || e.key === 'Enter') {
+  const typing = document.activeElement === searchInput;
+
+  if (typing) {
+    if (e.key === 'ArrowDown') {
       e.preventDefault();
       searchInput.blur();
-      if (e.key === 'Enter') pasteSelected();
+      return;
+    }
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      searchInput.blur();
+      pasteSelected();
       return;
     }
     return;
@@ -150,47 +243,67 @@ document.addEventListener('keydown', (e) => {
 
   if (e.key === 'ArrowRight') {
     e.preventDefault();
-    if (selectedIndex < filtered.length - 1) {
-      selectedIndex++;
-      render();
-    }
+    moveSelection(1);
   } else if (e.key === 'ArrowLeft') {
     e.preventDefault();
-    if (selectedIndex > 0) {
-      selectedIndex--;
-      render();
-    }
+    moveSelection(-1);
+  } else if (e.key === 'Home') {
+    e.preventDefault();
+    if (filtered[0]) setSelection(filtered[0].id);
+  } else if (e.key === 'End') {
+    e.preventDefault();
+    if (filtered.length) setSelection(filtered[filtered.length - 1].id);
   } else if (e.key === 'Enter') {
     e.preventDefault();
     pasteSelected();
   } else if (e.key === 'Backspace' || e.key === 'Delete') {
     e.preventDefault();
-    deleteSelected();
-  } else if (e.key === '/' || (e.metaKey && e.key === 'f')) {
+    if (selectedId) removeItem(selectedId);
+  } else if (e.metaKey && e.key.toLowerCase() === 'c') {
+    e.preventDefault();
+    copySelected();
+  } else if (e.key === '/' || (e.metaKey && e.key.toLowerCase() === 'f')) {
     e.preventDefault();
     searchInput.focus();
+    searchInput.select();
   } else if (/^[1-9]$/.test(e.key)) {
     const idx = parseInt(e.key, 10) - 1;
-    if (idx < filtered.length) {
-      selectedIndex = idx;
-      pasteSelected();
+    if (filtered[idx]) {
+      setSelection(filtered[idx].id);
+      window.clipAPI.pasteItem(filtered[idx].id);
     }
   }
 });
 
 searchInput.addEventListener('input', (e) => {
   searchKeyword = e.target.value;
-  selectedIndex = 0;
-  applyFilter();
+  applyFilter(0);
+});
+
+searchInput.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape') {
+    e.preventDefault();
+    if (searchKeyword) {
+      searchKeyword = '';
+      searchInput.value = '';
+      applyFilter(0);
+    } else {
+      window.clipAPI.hideWindow();
+    }
+  }
 });
 
 clearBtn.addEventListener('click', () => {
-  if (confirm('确认清空所有剪贴板历史？')) {
+  if (items.length === 0) return;
+  if (confirm(`确认清空全部 ${items.length} 条剪贴板记录？`)) {
     window.clipAPI.clearHistory();
   }
 });
 
-// 每30秒刷新时间显示
+// 每 20 秒只刷新时间文案，不重建卡片
 setInterval(() => {
-  if (filtered.length > 0) render();
-}, 30000);
+  cardList.querySelectorAll('.time[data-ts]').forEach(el => {
+    const ts = Number(el.dataset.ts);
+    if (ts) el.textContent = formatTime(ts);
+  });
+}, 20000);

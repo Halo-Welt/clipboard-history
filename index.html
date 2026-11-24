@@ -2,33 +2,35 @@
 <html lang="zh-CN">
 <head>
   <meta charset="UTF-8">
+  <meta name="color-scheme" content="light dark">
   <title>Clipboard History</title>
   <link rel="stylesheet" href="styles.css">
 </head>
 <body>
-  <div class="container">
-    <div class="topbar">
+  <div class="panel">
+    <header class="topbar">
       <div class="search-wrap">
-        <svg class="search-icon" viewBox="0 0 24 24" width="14" height="14"><path fill="currentColor" d="M15.5 14h-.79l-.28-.27a6.5 6.5 0 1 0-.7.7l.27.28v.79l4.25 4.25a1.003 1.003 0 0 0 1.42-1.42L15.5 14zm-6 0A4.5 4.5 0 1 1 14 9.5 4.5 4.5 0 0 1 9.5 14z"/></svg>
-        <input id="searchInput" type="text" placeholder="搜索..." autocomplete="off" spellcheck="false" />
+        <svg class="search-icon" viewBox="0 0 24 24" width="13" height="13" aria-hidden="true">
+          <path fill="currentColor" d="M15.5 14h-.79l-.28-.27a6.5 6.5 0 1 0-.7.7l.27.28v.79l4.25 4.25a1.003 1.003 0 0 0 1.42-1.42L15.5 14zm-6 0A4.5 4.5 0 1 1 14 9.5 4.5 4.5 0 0 1 9.5 14z"/>
+        </svg>
+        <input id="searchInput" type="text" placeholder="搜索剪贴板" autocomplete="off" spellcheck="false" />
       </div>
-      <div class="tabs">
-        <div class="tab active"><span class="dot"></span>剪贴板</div>
-      </div>
+      <div class="status" id="status"></div>
       <div class="actions">
-        <button id="clearBtn" title="清空历史">清空</button>
+        <button id="clearBtn" type="button">清空</button>
       </div>
-    </div>
+    </header>
 
     <div id="cardList" class="card-list"></div>
 
-    <div class="footer">
-      <span class="hint">↵ 粘贴</span>
-      <span class="hint">← → 选择</span>
-      <span class="hint">⌫ 删除</span>
-      <span class="hint">Esc 关闭</span>
-      <span class="hint right">⇧⌘V 呼出</span>
-    </div>
+    <footer class="footer">
+      <span><kbd>←</kbd><kbd>→</kbd> 选择</span>
+      <span><kbd>↵</kbd> 粘贴</span>
+      <span><kbd>⌘</kbd><kbd>C</kbd> 复制</span>
+      <span><kbd>⌫</kbd> 删除</span>
+      <span><kbd>esc</kbd> 关闭</span>
+      <span class="right"><kbd>⇧</kbd><kbd>⌘</kbd><kbd>V</kbd> 呼出</span>
+    </footer>
   </div>
 
   <script src="renderer.js"></script>

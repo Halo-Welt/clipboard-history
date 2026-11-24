@@ -11,8 +11,8 @@
 - 🎯 全局快捷键 **⇧⌘V** 呼出 / 隐藏
 - 📋 自动监听剪贴板（文本 + 图片），自动去重
 - 🔍 关键字搜索
-- ⌨️ 全键盘操作（← → 切换、Enter 粘贴、1-9 直选、Delete 删除、⌘F 搜索、Esc 关闭）
-- 💾 持久化存储，最多 200 条
+- ⌨️ 全键盘操作（← → 切换、Enter 粘贴、1-9 直选、⌘C 复制、Delete 删除、⌘F 搜索、Esc 关闭）
+- 💾 持久化存储，最多 200 条：元数据 JSON + 图片独立文件，原子写盘带 `.bak` 兜底
 - ✨ 毛玻璃 vibrancy + 横向滑动卡片
 - 🍎 隐藏 Dock 图标，仅菜单栏 📋 常驻
 - 🔄 菜单栏可勾选「**开机自启动**」，一次配置永久生效
@@ -91,8 +91,10 @@ npm start
 | ← / → | 选择卡片 |
 | Enter | 粘贴选中项 |
 | 1-9 | 直接粘贴对应序号 |
+| ⌘C | 复制选中项到剪贴板（不粘贴、不关闭窗口） |
 | Delete / Backspace | 删除选中项 |
 | ⌘F 或 / | 聚焦搜索框 |
+| Home / End | 跳到第一张 / 最后一张 |
 | Esc | 关闭窗口 |
 | 右键卡片 | 删除该项 |
 
@@ -153,6 +155,8 @@ npm start
 
 ```bash
 npm start            # 开发模式启动（直接运行 electron .）
+# 如果你的终端环境里带了 ELECTRON_RUN_AS_NODE（某些 IDE/工具链会注入），改用：
+env -u ELECTRON_RUN_AS_NODE ./node_modules/.bin/electron .
 npm run package      # 打包生成 .app（输出到 dist/）
 ./install.sh         # 把 dist/ 中的 .app 安装到 /Applications
 ```
@@ -162,8 +166,20 @@ npm run package      # 打包生成 .app（输出到 dist/）
 - [Electron 28](https://www.electronjs.org/) — Chromium + Node 跨平台框架
 - [@electron/packager](https://github.com/electron/packager) — 打包工具
 - macOS vibrancy + `LSUIElement`（无 Dock 图标）
-- 本地 JSON 持久化（`app.getPath('userData')`）
+- 本地持久化：`userData/clipboard-history.json` 存元数据，`userData/images/` 存原图与 480px 缩略图（自定义 `ch-image://` 协议按需加载缩略图，不再把 base64 塞进 JSON）
 - `app.setLoginItemSettings` 实现开机自启
+
+## 🖼 外观
+
+![深色](docs/ui-dark.png)
+
+![浅色](docs/ui-light.png)
+
+## ⚡ 性能
+
+空闲 CPU 约 0–0.3%，剪贴板里放着一张 4.6 MB 图片时也保持在同一水平（旧实现会升到 11–41%）：
+剪贴板轮询先用几乎零成本的 `readText()` 判文本，只有在没有文本时才 `readBuffer('public.png')` 取原始字节算哈希，
+只有哈希变化才解码缩略图。详见 [AUDIT.md](./AUDIT.md)。
 
 ## 📝 说明
 
