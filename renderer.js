@@ -9,7 +9,7 @@ const searchInput = document.getElementById('searchInput');
 const clearBtn = document.getElementById('clearBtn');
 const statusEl = document.getElementById('status');
 
-const TYPE_LABEL = { text: '文本', link: '链接', image: '图片' };
+const TYPE_LABEL = { text: '文本', link: '链接', image: '图片', files: '文件', richtext: '富文本' };
 
 function formatTime(ts) {
   const diff = Math.max(0, Date.now() - ts);
@@ -31,12 +31,22 @@ function formatBytes(n) {
 
 function detectType(item) {
   if (item.type === 'image') return 'image';
+  if (item.type === 'files') return 'files';
+  if (item.type === 'richtext') return 'richtext';
   const txt = (item.content || '').trim();
   if (/^https?:\/\//i.test(txt) && txt.length < 500 && !txt.includes('\n')) return 'link';
   return 'text';
 }
 
 function itemMeta(item) {
+  if (item.type === 'files') {
+    const n = (item.files || []).length;
+    const bytes = formatBytes(item.bytes);
+    return bytes ? `${n} 个文件 · ${bytes}` : `${n} 个文件`;
+  }
+  if (item.type === 'richtext') {
+    return `${item.length || (item.content || '').length} 字符 · 富文本`;
+  }
   if (item.type === 'image') {
     const size = item.width && item.height ? `${item.width}×${item.height}` : '图片';
     const bytes = formatBytes(item.bytes);
@@ -52,6 +62,71 @@ function updateStatus() {
   } else {
     statusEl.textContent = items.length ? `共 ${items.length} 条` : '';
   }
+}
+
+// 富文本预览：只保留排版标签，去光所有属性，杜绝脚本和远程资源
+const RT_ALLOWED = new Set(['B', 'STRONG', 'I', 'EM', 'U', 'S', 'STRIKE', 'DEL', 'CODE', 'PRE',
+  'P', 'BR', 'DIV', 'UL', 'OL', 'LI', 'H1', 'H2', 'H3', 'H4', 'BLOCKQUOTE', 'MARK', 'SPAN', 'TABLE', 'TR', 'TD', 'TH']);
+// 这些标签连同内容一起丢掉（<style> 的 textContent 是一大段 CSS，不能当文字保留）
+const RT_DROP = new Set(['SCRIPT', 'STYLE', 'IFRAME', 'OBJECT', 'EMBED', 'LINK', 'META', 'TITLE', 'HEAD', 'IMG', 'VIDEO', 'AUDIO', 'SVG', 'CANVAS']);
+
+function sanitizeRichHtml(html) {
+  if (!html) return null;
+  let doc;
+  try {
+    doc = new DOMParser().parseFromString(html, 'text/html');
+  } catch (e) {
+    return null;
+  }
+  const walk = (node) => {
+    for (const child of [...node.children]) {
+      if (RT_DROP.has(child.tagName)) {
+        child.remove();
+        continue;
+      }
+      if (!RT_ALLOWED.has(child.tagName)) {
+        // 不认识的标签：保留文字，丢掉外壳
+        const text = document.createTextNode(child.textContent || '');
+        child.replaceWith(text);
+        continue;
+      }
+      for (const attr of [...child.attributes]) child.removeAttribute(attr.name);
+      walk(child);
+    }
+  };
+  walk(doc.body);
+  // 去掉空壳和连续的换行
+  const frag = document.createDocumentFragment();
+  for (const child of [...doc.body.childNodes]) frag.appendChild(document.importNode(child, true));
+  return frag;
+}
+
+function buildFilesBody(item) {
+  const wrap = document.createElement('div');
+  wrap.className = 'file-list';
+  const files = item.files || [];
+  files.slice(0, 3).forEach(f => {
+    const row = document.createElement('div');
+    row.className = 'file-row';
+    const img = document.createElement('img');
+    img.className = 'file-icon';
+    img.src = /^file:/.test(f.icon) ? f.icon : `ch-image://src/${f.icon}`;
+    img.alt = '';
+    img.loading = 'lazy';
+    img.draggable = false;
+    const name = document.createElement('span');
+    name.className = 'file-name';
+    name.textContent = f.name;
+    row.append(img, name);
+    wrap.appendChild(row);
+  });
+  if (files.length > 3) {
+    const more = document.createElement('div');
+    more.className = 'file-more';
+    more.textContent = `还有 ${files.length - 3} 个文件`;
+    wrap.appendChild(more);
+  }
+  return wrap;
 }
 
 // 来源 App 的小图标（Paste 那种「卡片上能看到这条是从哪个 App 复制的」）
@@ -111,6 +186,15 @@ function buildCard(item, index) {
     img.loading = 'lazy';
     img.decoding = 'async';
     body.appendChild(img);
+  } else if (item.type === 'files') {
+    body.appendChild(buildFilesBody(item));
+  } else if (item.type === 'richtext') {
+    const rt = document.createElement('div');
+    rt.className = 'rt-preview';
+    const safe = sanitizeRichHtml(item.html);
+    if (safe) rt.appendChild(safe);
+    else rt.textContent = item.preview || item.content || '';
+    body.appendChild(rt);
   } else {
     body.textContent = item.preview || item.content || '';
   }
@@ -195,7 +279,8 @@ function applyFilter(preferredIndex) {
     : items.filter(item => {
         const inContent = item.type !== 'image' && (item.content || '').toLowerCase().includes(kw);
         const inSource = (item.source && item.source.name || '').toLowerCase().includes(kw);
-        return inContent || inSource;
+        const inFiles = (item.files || []).some(f => (f.name || '').toLowerCase().includes(kw));
+        return inContent || inSource || inFiles;
       });
 
   if (!filtered.some(item => item.id === selectedId)) {

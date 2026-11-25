@@ -102,3 +102,12 @@ P0 改造对现有 `clipboard-history.json` 兼容：第一次启动时做一次
 ### 与 Paste 的差距（对照见 README 讨论）
 Paste 有 Pinboard（收藏板）、iCloud 跨设备同步、Apple Intelligence 预测下一条、MCP 供 AI 读取剪贴板、忽略密码类 App 的隐私规则、富内容类型（文件/颜色/富文本）。
 本项目定位是「零依赖、本地、单机快捷键工具」，下一步优先级建议：**Pin 收藏** → **忽略 App 规则** → **文件/颜色类型** → 同步（可选 iCloud）。
+
+### v1.5.0 新增：文件 / 富文本类型
+- **文件**：Finder 复制时写的是 `NSFilenamesPboardType`（多个文件全在这一个 plist 数组里），但 `availableFormats()` 只会列出 `text/uri-list`——所以不能拿 formats 判断，直接 `readBuffer('NSFilenamesPboardType')` 再解析 `<string>` 数组；读不到时退回 `public.file-url`、`text/uri-list`。条目存 `files: [{name,path,isDir,size}]`，去重 hash 用 `f:` + 路径列表。
+- **文件图标**：按「目录 / 扩展名」缓存 `sources/file-<sha1(ext|dir)[0:16]>.png`（`app.getFileIcon` 抓 64px），协议白名单放宽成 `^(src|file)-[A-Za-z0-9]+\.png$`，同一扩展名只抓一次。
+- **粘贴文件**：AppleScript 的 `set the clipboard to {POSIX file …}` 只写了个 AppleScript list，Finder 收不到；改用 `osascript -l JavaScript` 调 `NSPasteboard.writeObjects([NSURL…])`，实测剪贴板里出现 `NSFilenamesPboardType` + `text/uri-list`。
+- **富文本**：`availableFormats()` 会同时给 `text/plain` / `text/html` / `text/rtf`，用 `readHTML()` / `readRTF()` 读；只有 HTML 里真的出现 b/strong/i/em/u/ul/ol/li/h1-6/table/blockquote/mark/pre 或 `font-weight:bold` / `font-style:italic` / `text-decoration:underline` / `background-color` 才算富文本——Chrome 复制纯文字也会塞一份只带 `<span>` 的 HTML，那种仍按纯文本记。
+- **存储**：RTF/HTML 落成 `userData/content/<id>.rtf|.html`（各限 2 MB），JSON 里只留文件名；粘贴时从磁盘读回 `clipboard.write({ text, html, rtf })`。删除/清空时一并删掉。
+- **渲染**：卡片预览用 DOMParser 白名单清洗 HTML（只留排版标签、**去掉全部属性**，`<style>/<script>/<iframe>/<img>` 等连内容一起丢），避免 Cocoa 生成的 `<style>` 文本糊进卡片，也杜绝远程资源。
+- **不做颜色类型**：`NSColor` 写的 pasteboard Electron 完全看不到（`availableFormats()` 为空），要做只能每 tick spawn osascript，代价远超收益。

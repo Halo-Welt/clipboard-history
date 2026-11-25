@@ -54,6 +54,9 @@ function migrateLegacyUserDataOnce() {
 
 const IMAGE_SCHEME = 'ch-image';
 const SOURCES_DIR = 'sources';   // 来源 App 图标缓存目录
+const CONTENT_DIR = 'content';   // 富文本（RTF/HTML）原始内容
+const MAX_HTML_BYTES = 100 * 1024;      // 渲染用的 HTML 上限
+const MAX_RICH_BYTES = 2 * 1024 * 1024; // 落盘的 RTF/HTML 上限
 const pendingIcons = new Set();  // 正在抓取的图标，避免同一 App 重复起进程
 const POLL_INTERVAL = 700;
 const GITHUB_REPO = 'Halo-Welt/clipboard-history';
@@ -93,6 +96,8 @@ class Store {
     fs.mkdirSync(this.imagesDir, { recursive: true });
     this.sourcesDir = path.join(this.dir, SOURCES_DIR);
     fs.mkdirSync(this.sourcesDir, { recursive: true });
+    this.contentDir = path.join(this.dir, CONTENT_DIR);
+    fs.mkdirSync(this.contentDir, { recursive: true });
     this.iconCache = new Set(fs.readdirSync(this.sourcesDir));
     this.filePath = path.join(this.dir, 'clipboard-history.json');
 
@@ -197,15 +202,18 @@ class Store {
   }
 
   dropFiles(item) {
-    if (item.type !== 'image') return;
-    for (const name of [item.file, item.thumb]) {
-      if (!name) continue;
-      try {
-        fs.unlinkSync(path.join(this.imagesDir, name));
-      } catch (e) {
-        // 文件可能已经不在了
+    const wipe = (dir, names) => {
+      for (const name of names) {
+        if (!name) continue;
+        try {
+          fs.unlinkSync(path.join(dir, name));
+        } catch (e) {
+          // 文件可能已经不在了
+        }
       }
-    }
+    };
+    if (item.type === 'image') wipe(this.imagesDir, [item.file, item.thumb]);
+    if (item.type === 'richtext') wipe(this.contentDir, [item.htmlFile, item.rtfFile]);
   }
 
   get(key, def) {
@@ -351,6 +359,158 @@ function appIconCandidates(appPath) {
   return found.filter(p => { try { return fs.statSync(p).isFile(); } catch (e) { return false; } });
 }
 
+// ============ 文件 / 富文本 ============
+
+// Finder 复制文件时写的是 NSFilenamesPboardType（一个 plist 数组）
+function parsePlistStrings(buf) {
+  const xml = buf.toString('utf8');
+  const out = [];
+  const re = /<string>([\s\S]*?)<\/string>/g;
+  let m;
+  while ((m = re.exec(xml))) {
+    out.push(m[1]
+      .replace(/&lt;/g, '<')
+      .replace(/&gt;/g, '>')
+      .replace(/&quot;/g, '"')
+      .replace(/&apos;/g, "'")
+      .replace(/&amp;/g, '&'));
+  }
+  return out;
+}
+
+function fileUrlToPath(raw) {
+  const url = (raw || '').trim();
+  if (!url.startsWith('file://')) return '';
+  try {
+    return decodeURIComponent(url.slice('file://'.length));
+  } catch (e) {
+    return '';
+  }
+}
+
+function readClipboardFiles(formats) {
+  const hasFiles = formats.includes('NSFilenamesPboardType') ||
+    formats.includes('public.file-url') ||
+    formats.includes('text/uri-list');
+  if (!hasFiles) return [];
+
+  const paths = [];
+  // 注意：availableFormats() 不一定会列出 NSFilenamesPboardType（实测 Finder 复制只给
+  // text/uri-list），但 readBuffer 依然能读到完整的 plist 数组，所以这里无条件试一次。
+  try {
+    for (const p of parsePlistStrings(clipboard.readBuffer('NSFilenamesPboardType'))) {
+      if (p) paths.push(p);
+    }
+  } catch (e) {}
+  if (!paths.length && formats.includes('public.file-url')) {
+    try {
+      const p = fileUrlToPath(clipboard.readBuffer('public.file-url').toString('utf8'));
+      if (p) paths.push(p);
+    } catch (e) {}
+  }
+  if (!paths.length && formats.includes('text/uri-list')) {
+    try {
+      for (const line of clipboard.readBuffer('text/uri-list').toString('utf8').split(/\r?\n/)) {
+        const p = fileUrlToPath(line);
+        if (p) paths.push(p);
+      }
+    } catch (e) {}
+  }
+
+  return [...new Set(paths)].filter(p => fs.existsSync(p)).slice(0, 50);
+}
+
+// 只有真的带格式才算「富文本」：Chrome 复制纯文字也会塞一份
+// 只带 <span> 的 HTML，那种情况仍按纯文本记，避免历史里一片"富文本"。
+const RICH_MARKERS = [
+  /<b[\s>]/i, /<strong[\s>]/i, /<i[\s>]/i, /<em[\s>]/i, /<u[\s>]/i,
+  /<ul[\s>]/i, /<ol[\s>]/i, /<li[\s>]/i, /<h[1-6][\s>]/i, /<table[\s>]/i,
+  /<blockquote[\s>]/i, /<mark[\s>]/i, /<pre[\s>]/i,
+  /font-weight\s*:\s*(bold|[6-9]00)/i,
+  /font-style\s*:\s*italic/i,
+  /text-decoration\s*:[^;"]*underline/i,
+  /background-color\s*:/i
+];
+
+function readClipboardRich(formats) {
+  if (!formats.includes('text/rtf') && !formats.includes('text/html')) return null;
+  let rtf = '';
+  let html = '';
+  try {
+    if (formats.includes('text/rtf')) rtf = clipboard.readRTF() || '';
+  } catch (e) {}
+  try {
+    if (formats.includes('text/html')) html = clipboard.readHTML() || '';
+  } catch (e) {}
+
+  const htmlHasFormatting = !!html && RICH_MARKERS.some(re => re.test(html));
+  // RTF 只要不是纯 "{\rtf1\ansi ...\par}" 这种纯文本转写，就认为有格式
+  const rtfHasFormatting = !!rtf && (RICH_MARKERS.some(re => re.test(rtf)) || /\\b\b|\\i\b|\\ul\b|\\cf\d/.test(rtf));
+  if (!htmlHasFormatting && !rtfHasFormatting) return null;
+  return { rtf, html };
+}
+
+function saveRichFiles(id, html, rtf) {
+  const out = { htmlFile: '', rtfFile: '' };
+  try {
+    if (html) {
+      const buf = Buffer.from(html, 'utf8').subarray(0, MAX_RICH_BYTES);
+      out.htmlFile = `${id}.html`;
+      fs.writeFileSync(path.join(store.contentDir, out.htmlFile), buf);
+    }
+    if (rtf) {
+      const buf = Buffer.from(rtf, 'utf8').subarray(0, MAX_RICH_BYTES);
+      out.rtfFile = `${id}.rtf`;
+      fs.writeFileSync(path.join(store.contentDir, out.rtfFile), buf);
+    }
+  } catch (e) {
+    console.error('saveRichFiles failed:', e.message);
+  }
+  return out;
+}
+
+function readContentFile(name, limit) {
+  if (!name) return '';
+  try {
+    const buf = fs.readFileSync(path.join(store.contentDir, name));
+    return buf.subarray(0, limit || MAX_RICH_BYTES).toString('utf8');
+  } catch (e) {
+    return '';
+  }
+}
+
+// 文件图标按「目录 / 扩展名」缓存，一个扩展名只抓一次
+function fileIconKey(filePath) {
+  let ext = '';
+  let isDir = false;
+  try {
+    ext = path.extname(filePath).toLowerCase();
+    isDir = fs.statSync(filePath).isDirectory();
+  } catch (e) {}
+  return sha1(isDir ? 'dir' : (ext || 'generic')).slice(0, 16);
+}
+
+const pendingFileIcons = new Set();
+
+async function ensureFileIcon(filePath) {
+  const key = fileIconKey(filePath);
+  const file = `file-${key}.png`;
+  if (store.iconCache.has(file) || pendingFileIcons.has(file)) return true;
+  pendingFileIcons.add(file);
+  try {
+    const img = await app.getFileIcon(filePath, { size: 'normal' });
+    if (img.isEmpty()) return false;
+    const big = img.resize({ width: 64, height: 64, quality: 'best' });
+    fs.writeFileSync(path.join(store.sourcesDir, file), big.toPNG());
+    store.iconCache.add(file);
+    return true;
+  } catch (e) {
+    return false;
+  } finally {
+    pendingFileIcons.delete(file);
+  }
+}
+
 // 判断一张图标是不是「灰度/掩膜版」：现代 App（Chrome、微信…）把彩色图标放在
 // Assets.car 里，.icns 只剩一张黑白 mask，直接转出来会是灰图。
 function looksMonochrome(file) {
@@ -447,12 +607,12 @@ async function ensureSourceIcon(source) {
 
 // 传给渲染进程的字段（不含 base64 大图）
 function publicItem(item) {
-  return {
+  const out = {
     id: item.id,
     type: item.type,
     timestamp: item.timestamp,
     preview: item.preview || '',
-    content: item.type === 'text' ? (item.content || '') : undefined,
+    content: (item.type === 'text' || item.type === 'richtext') ? (item.content || '') : undefined,
     length: item.length || 0,
     width: item.width || 0,
     height: item.height || 0,
@@ -461,6 +621,21 @@ function publicItem(item) {
     source: item.source || null,
     sourceIcon: sourceIconUrl(item.source)
   };
+
+  if (item.type === 'files' && Array.isArray(item.files)) {
+    out.files = item.files.map(f => ({
+      name: f.name,
+      isDir: !!f.isDir,
+      icon: `file-${fileIconKey(f.path)}.png`
+    }));
+  }
+
+  if (item.type === 'richtext') {
+    // 渲染只要一份裁剪过的 HTML；原始 RTF 留在磁盘上用于粘贴
+    out.html = readContentFile(item.htmlFile, MAX_HTML_BYTES);
+  }
+
+  return out;
 }
 
 // ============ 运行状态 ============
@@ -469,6 +644,7 @@ let tray = null;
 let clipboardWatcher = null;
 let previousAppName = null;
 let lastTextHash = '';
+let lastFilesHash = '';
 let lastImageHash = '';
 
 // ============ 窗口 ============
@@ -596,6 +772,65 @@ async function addTextItem(text, source) {
   return added;
 }
 
+async function addFilesItem(paths, source) {
+  const files = paths.map(p => {
+    let size = 0;
+    let isDir = false;
+    try {
+      const st = fs.statSync(p);
+      isDir = st.isDirectory();
+      size = st.size;
+    } catch (e) {}
+    return { name: path.basename(p), path: p, isDir, size };
+  });
+  const item = {
+    id: newId(),
+    type: 'files',
+    hash: 'f:' + sha1(paths.join('\n')),
+    timestamp: Date.now(),
+    files,
+    preview: files.map(f => f.name).join('、'),
+    length: files.length,
+    bytes: files.reduce((n, f) => n + (f.size || 0), 0),
+    source: source || null
+  };
+  const added = store.add(item);
+  if (mainWindow && mainWindow.isVisible()) sendHistory();
+  refreshSourceIcon(source);
+  // 文件图标：抓完再推一次，卡片上就会从占位变成真实图标
+  Promise.all(files.map(f => ensureFileIcon(f.path)))
+    .then(() => { if (mainWindow && mainWindow.isVisible()) sendHistory(); })
+    .catch(() => {});
+  return added;
+}
+
+async function addRichItem(text, rich, source) {
+  const truncated = Buffer.byteLength(text, 'utf8') > MAX_TEXT_BYTES;
+  const content = truncated
+    ? Buffer.from(text, 'utf8').subarray(0, MAX_TEXT_BYTES).toString('utf8')
+    : text;
+  const id = newId();
+  const saved = saveRichFiles(id, rich.html, rich.rtf);
+  const item = {
+    id,
+    type: 'richtext',
+    hash: 'r:' + sha1(content + '\u0000' + (rich.html || '').slice(0, 2000) + '\u0000' + (rich.rtf || '').slice(0, 2000)),
+    content,
+    preview: content.length > 200 ? content.slice(0, 200) : content,
+    timestamp: Date.now(),
+    length: text.length,
+    truncated,
+    htmlFile: saved.htmlFile,
+    rtfFile: saved.rtfFile,
+    bytes: Buffer.byteLength(rich.html || '', 'utf8') + Buffer.byteLength(rich.rtf || '', 'utf8'),
+    source: source || null
+  };
+  const added = store.add(item);
+  if (mainWindow && mainWindow.isVisible()) sendHistory();
+  refreshSourceIcon(source);
+  return added;
+}
+
 async function addImageItem(buf, source) {
   const saved = saveImageFiles(buf);
   if (!saved) return null;
@@ -636,18 +871,38 @@ function startClipboardWatcher() {
 
   clipboardWatcher = setInterval(() => {
     try {
+      const formats = clipboard.availableFormats() || [];
+
+      // 1) 文件优先：Finder 复制文件时文本通常是空的，但某些 App 会同时给一段文本
+      const files = readClipboardFiles(formats);
+      if (files.length) {
+        const filesHash = 'f:' + sha1(files.join('\n'));
+        if (filesHash !== lastFilesHash) {
+          lastFilesHash = filesHash;
+          lastTextHash = hashText(clipboard.readText() || '');
+          const source = captureSourceApp();
+          addFilesItem(files, source).catch(e => console.error('addFilesItem:', e));
+        }
+        return;
+      }
+      lastFilesHash = '';
+
       const text = clipboard.readText();
       const textHash = text ? hashText(text) : '';
 
       if (textHash && textHash !== lastTextHash) {
         lastTextHash = textHash;
         const source = captureSourceApp();
-        addTextItem(text, source).catch(e => console.error('addTextItem:', e));
+        const rich = readClipboardRich(formats);
+        if (rich) {
+          addRichItem(text, rich, source).catch(e => console.error('addRichItem:', e));
+        } else {
+          addTextItem(text, source).catch(e => console.error('addTextItem:', e));
+        }
         return;
       }
       if (textHash) return; // 有文本时不再检查图片，避免影响文本复制
 
-      const formats = clipboard.availableFormats() || [];
       if (!clipboardHasImage(formats)) return;
 
       const buf = clipboard.readBuffer('public.png');
@@ -1087,7 +1342,7 @@ function setupImageProtocol() {
       const name = decodeURIComponent(url.pathname.replace(/^\/+/, ''));
       const safe = path.basename(name);
       if (host === 'src') {
-        if (!/^src-[A-Za-z0-9]+\.png$/.test(safe)) {
+        if (!/^(src|file)-[A-Za-z0-9]+\.png$/.test(safe)) {
           return new Response('Bad request', { status: 400 });
         }
         const data = fs.readFileSync(path.join(store.sourcesDir, safe));
@@ -1139,13 +1394,44 @@ if (!gotLock) {
 }
 
 // ============ IPC ============
-function writeItemToClipboard(item) {
+function writeItemsToClipboard(item) {
   if (!item) return false;
+
   if (item.type === 'text') {
     clipboard.writeText(item.content || '');
     lastTextHash = item.hash || hashText(item.content || '');
     return true;
   }
+
+  if (item.type === 'richtext') {
+    const html = readContentFile(item.htmlFile);
+    const rtf = readContentFile(item.rtfFile);
+    clipboard.write({ text: item.content || '', html, rtf });
+    lastTextHash = hashText(item.content || '');
+    return true;
+  }
+
+  if (item.type === 'files') {
+    const paths = (item.files || []).map(f => f.path).filter(Boolean);
+    if (!paths.length) return false;
+    try {
+      // AppleScript 的 `set the clipboard to {POSIX file …}` 只会写一个 AppleScript list，
+      // Finder 收不到文件；必须用 NSPasteboard.writeObjects 写 NSURL 数组。
+      const js = `ObjC.import('AppKit');
+(function () {
+  var pb = $.NSPasteboard.generalPasteboard;
+  pb.clearContents;
+  pb.writeObjects($(${JSON.stringify(paths)}.map(function (p) { return $.NSURL.fileURLWithPath(p); })));
+})();`;
+      execFileSync('/usr/bin/osascript', ['-l', 'JavaScript', '-e', js], { timeout: 8000 });
+      lastFilesHash = 'f:' + sha1(paths.join('\n'));
+      return true;
+    } catch (e) {
+      console.error('File paste failed:', e.message);
+      return false;
+    }
+  }
+
   try {
     const buf = fs.readFileSync(path.join(store.imagesDir, item.file));
     const img = nativeImage.createFromBuffer(buf);
@@ -1179,14 +1465,14 @@ function pasteToPreviousApp() {
 ipcMain.on('paste-item', (event, id) => {
   const item = store.find(id);
   if (!item) return;
-  if (!writeItemToClipboard(item)) return;
+  if (!writeItemsToClipboard(item)) return;
   hideWindow();
   pasteToPreviousApp();
 });
 
 ipcMain.on('copy-item', (event, id) => {
   const item = store.find(id);
-  if (item) writeItemToClipboard(item);
+  if (item) writeItemsToClipboard(item);
 });
 
 ipcMain.on('delete-item', (event, id) => {
