@@ -111,3 +111,11 @@ Paste 有 Pinboard（收藏板）、iCloud 跨设备同步、Apple Intelligence 
 - **存储**：RTF/HTML 落成 `userData/content/<id>.rtf|.html`（各限 2 MB），JSON 里只留文件名；粘贴时从磁盘读回 `clipboard.write({ text, html, rtf })`。删除/清空时一并删掉。
 - **渲染**：卡片预览用 DOMParser 白名单清洗 HTML（只留排版标签、**去掉全部属性**，`<style>/<script>/<iframe>/<img>` 等连内容一起丢），避免 Cocoa 生成的 `<style>` 文本糊进卡片，也杜绝远程资源。
 - **不做颜色类型**：`NSColor` 写的 pasteboard Electron 完全看不到（`availableFormats()` 为空），要做只能每 tick spawn osascript，代价远超收益。
+
+### v1.5.1：接力剪贴板（Universal Clipboard）的来源图标
+- iPhone/iPad 复制、在 Mac 上粘贴的内容，落进本机 pasteboard 时会带上私有类型 `com.apple.is-remote-clipboard`（值 `"1"`）。
+  这个类型**不会**出现在 `availableFormats()` 里，但 `clipboard.readBuffer('com.apple.is-remote-clipboard')` 能读到——和 `NSFilenamesPboardType` 是同一类陷阱，所以判断时直接读 buffer。
+- 命中时来源记成 `{ bundleId: 'com.apple.universal-clipboard', name: 'iCloud 剪贴板', remote: true }`，优先于 `captureSourceApp()`（否则会记成剪贴板 App 自己或前台窗口）。
+- 图标随包内置 `assets/icloud-chip.png`（64px 蓝色渐变圆角方 + 白色云 + 下箭头），启动时复制到 `userData/sources/src-remote.png`，`sourceIconUrl()` 对 `source.remote` 直接返回它。
+- 调试用：`main.js` 里的 `CH_CAPTURE` / `CH_CAPTURE_THEME`（仅环境变量触发）会在启动 1.5s 后显示窗口、`capturePage()` 写 PNG 再退出，用来在本机截真实窗口。
+  注意 `capturePage()` 抓不到系统的 vibrancy 模糊层，所以真实截图背景是纯色，和屏幕上看到的毛玻璃效果不同。

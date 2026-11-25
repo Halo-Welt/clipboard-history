@@ -1,7 +1,7 @@
 {
   "name": "clipboard-history",
   "productName": "Clipboard",
-  "version": "1.5.0",
+  "version": "1.5.1",
   "description": "Clipboard — a lightweight clipboard history tool for macOS",
   "main": "main.js",
   "scripts": {

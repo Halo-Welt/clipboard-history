@@ -54,7 +54,16 @@ function migrateLegacyUserDataOnce() {
 
 const IMAGE_SCHEME = 'ch-image';
 const SOURCES_DIR = 'sources';   // 来源 App 图标缓存目录
-const CONTENT_DIR = 'content';   // 富文本（RTF/HTML）原始内容
+const CONTENT_DIR = 'content';
+// Universal Clipboard（iPhone/iPad ↔ Mac 的接力剪贴板）在 pasteboard 上留的标记
+const REMOTE_MARKER = 'com.apple.is-remote-clipboard';
+const REMOTE_SOURCE = {
+  bundleId: 'com.apple.universal-clipboard',
+  name: 'iCloud 剪贴板',
+  path: '',
+  remote: true
+};
+const REMOTE_ICON = 'src-remote.png';   // 富文本（RTF/HTML）原始内容
 const MAX_HTML_BYTES = 100 * 1024;      // 渲染用的 HTML 上限
 const MAX_RICH_BYTES = 2 * 1024 * 1024; // 落盘的 RTF/HTML 上限
 const pendingIcons = new Set();  // 正在抓取的图标，避免同一 App 重复起进程
@@ -331,7 +340,35 @@ function sourceIconFile(source) {
   return `src-${sha1(source.bundleId).slice(0, 16)}.png`;
 }
 
+// 接力剪贴板的内容在本机没有对应 App，用 iCloud 图标表示「从其他设备同步过来」
+function isRemoteClipboard() {
+  try {
+    const buf = clipboard.readBuffer(REMOTE_MARKER);
+    return !!(buf && buf.length && buf.toString('utf8').trim() === '1');
+  } catch (e) {
+    return false;
+  }
+}
+
+function ensureRemoteIcon() {
+  const dest = path.join(store.sourcesDir, REMOTE_ICON);
+  if (store.iconCache.has(REMOTE_ICON)) return;
+  try {
+    fs.copyFileSync(path.join(__dirname, 'assets', 'icloud-chip.png'), dest);
+    store.iconCache.add(REMOTE_ICON);
+  } catch (e) {
+    console.error('remote icon copy failed:', e.message);
+  }
+}
+
+function captureSourceOrRemote() {
+  return isRemoteClipboard() ? REMOTE_SOURCE : captureSourceApp();
+}
+
 function sourceIconUrl(source) {
+  if (source && source.remote) {
+    return store.iconCache && store.iconCache.has(REMOTE_ICON) ? `${IMAGE_SCHEME}://src/${REMOTE_ICON}` : '';
+  }
   const file = sourceIconFile(source);
   if (!file || !store.iconCache || !store.iconCache.has(file)) return '';
   return `${IMAGE_SCHEME}://src/${file}`;
@@ -880,7 +917,7 @@ function startClipboardWatcher() {
         if (filesHash !== lastFilesHash) {
           lastFilesHash = filesHash;
           lastTextHash = hashText(clipboard.readText() || '');
-          const source = captureSourceApp();
+          const source = captureSourceOrRemote();
           addFilesItem(files, source).catch(e => console.error('addFilesItem:', e));
         }
         return;
@@ -892,7 +929,7 @@ function startClipboardWatcher() {
 
       if (textHash && textHash !== lastTextHash) {
         lastTextHash = textHash;
-        const source = captureSourceApp();
+        const source = captureSourceOrRemote();
         const rich = readClipboardRich(formats);
         if (rich) {
           addRichItem(text, rich, source).catch(e => console.error('addRichItem:', e));
@@ -910,7 +947,7 @@ function startClipboardWatcher() {
       const hash = sha1(buf);
       if (hash === lastImageHash) return;
       lastImageHash = hash;
-      const source = captureSourceApp();
+      const source = captureSourceOrRemote();
       addImageItem(buf, source).catch(e => console.error('addImageItem:', e));
     } catch (e) {
       console.error('Clipboard watch error:', e);
@@ -1366,6 +1403,7 @@ function setupImageProtocol() {
 async function initApp() {
   migrateLegacyUserDataOnce();
   store.init();
+  ensureRemoteIcon();
   setupImageProtocol();
 
   if (process.platform === 'darwin' && app.dock) {
@@ -1378,6 +1416,27 @@ async function initApp() {
 
   const ret = globalShortcut.register('Shift+Command+V', () => toggleWindow());
   if (!ret) console.error('快捷键注册失败');
+
+  if (process.env.CH_CAPTURE) {
+    setTimeout(async () => {
+      try {
+        try {
+          const dark = process.env.CH_CAPTURE_THEME === 'dark';
+          nativeTheme.themeSource = dark ? 'dark' : 'light';
+          mainWindow.setVibrancy(null);
+          mainWindow.setBackgroundColor(dark ? '#1c1c1e' : '#f4f4f7');
+        } catch (e) {}
+        showWindow();
+        await new Promise(r => setTimeout(r, 1200));
+        const img = await mainWindow.webContents.capturePage();
+        fs.writeFileSync(process.env.CH_CAPTURE, img.toPNG());
+        console.log('captured', process.env.CH_CAPTURE);
+      } catch (e) {
+        console.error('capture failed:', e.message);
+      }
+      app.exit(0);
+    }, 1500);
+  }
 
   // 启动 5 秒后静默检查更新，之后每 6 小时一次
   setTimeout(() => checkForUpdates(true), 5000);
