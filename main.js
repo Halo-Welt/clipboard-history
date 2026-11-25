@@ -1,8 +1,9 @@
 const { app, BrowserWindow, globalShortcut, clipboard, ipcMain, screen, nativeImage, Tray, Menu, shell, dialog, Notification, protocol } = require('electron');
 const path = require('path');
 const fs = require('fs');
+const os = require('os');
 const crypto = require('crypto');
-const { exec } = require('child_process');
+const { exec, execFileSync } = require('child_process');
 const https = require('https');
 
 // ============ 常量 ============
@@ -52,6 +53,8 @@ function migrateLegacyUserDataOnce() {
 }
 
 const IMAGE_SCHEME = 'ch-image';
+const SOURCES_DIR = 'sources';   // 来源 App 图标缓存目录
+const pendingIcons = new Set();  // 正在抓取的图标，避免同一 App 重复起进程
 const POLL_INTERVAL = 700;
 const GITHUB_REPO = 'Halo-Welt/clipboard-history';
 const CURRENT_VERSION = app.getVersion();
@@ -88,6 +91,9 @@ class Store {
     this.dir = app.getPath('userData');
     this.imagesDir = path.join(this.dir, 'images');
     fs.mkdirSync(this.imagesDir, { recursive: true });
+    this.sourcesDir = path.join(this.dir, SOURCES_DIR);
+    fs.mkdirSync(this.sourcesDir, { recursive: true });
+    this.iconCache = new Set(fs.readdirSync(this.sourcesDir));
     this.filePath = path.join(this.dir, 'clipboard-history.json');
 
     const raw = this.readJSON(this.filePath) || this.readJSON(this.filePath + '.bak');
@@ -162,6 +168,7 @@ class Store {
     if (idx >= 0) {
       const [dup] = list.splice(idx, 1);
       if (item.timestamp) dup.timestamp = item.timestamp;
+      if (item.source) dup.source = item.source;
       list.unshift(dup);
       this.save();
       return dup;
@@ -268,6 +275,176 @@ function saveImageFiles(buf) {
   return { file, thumb, width, height, bytes: buf.length };
 }
 
+// ============ 来源 App（哪来的这条剪贴板）============
+// lsappinfo 是 Launch Services 自带的查询工具：不用辅助功能权限、不发通知、
+// 比 osascript 快一个量级（单次 <10ms），拿得到 bundle id 和 .app 路径。
+// 这些进程虽然"在前台"，但并不是用户真的在那里复制东西（锁屏、通知横幅、菜单栏）
+const IGNORED_SOURCE_IDS = new Set([
+  'com.liuxinyu.clipboard-history',
+  'com.apple.UserNotificationCenter',
+  'com.apple.notificationcenterui',
+  'com.apple.controlcenter',
+  'com.apple.dock',
+  'com.apple.WindowManager',
+  'com.apple.loginwindow',
+  'com.apple.ScreenSaver.Engine'
+]);
+
+function captureSourceApp() {
+  try {
+    const asn = execFileSync('/usr/bin/lsappinfo', ['front'], { timeout: 500 })
+      .toString().trim();
+    if (!asn) return null;
+    const out = execFileSync(
+      '/usr/bin/lsappinfo',
+      ['info', '-only', 'name,bundleID,bundlepath', asn],
+      { timeout: 500 }
+    ).toString();
+
+    const pick = (key) => {
+      const m = new RegExp(`"${key}"="([^"]*)"`).exec(out);
+      return m ? m[1] : '';
+    };
+    const bundleId = pick('CFBundleIdentifier');
+    const appPath = pick('LSBundlePath');
+    const name = pick('LSDisplayName') || path.basename(appPath || '', '.app');
+
+    if (!bundleId || !name) return null;
+    if (IGNORED_SOURCE_IDS.has(bundleId)) return null;
+
+    return { bundleId, name, path: appPath || '' };
+  } catch (e) {
+    return null;
+  }
+}
+
+function sourceIconFile(source) {
+  if (!source || !source.bundleId) return '';
+  return `src-${sha1(source.bundleId).slice(0, 16)}.png`;
+}
+
+function sourceIconUrl(source) {
+  const file = sourceIconFile(source);
+  if (!file || !store.iconCache || !store.iconCache.has(file)) return '';
+  return `${IMAGE_SCHEME}://src/${file}`;
+}
+
+// 从 .app 里找到真正的那份 .icns（CFBundleIconFile 可能不带后缀）
+function appIconCandidates(appPath) {
+  const resDir = path.join(appPath, 'Contents', 'Resources');
+  const found = [];
+  try {
+    const name = execFileSync(
+      '/usr/bin/plutil',
+      ['-extract', 'CFBundleIconFile', 'raw', '-o', '-', path.join(appPath, 'Contents', 'Info.plist')],
+      { timeout: 500 }
+    ).toString().trim();
+    if (name) found.push(path.join(resDir, name.endsWith('.icns') ? name : `${name}.icns`));
+  } catch (e) {
+    // 有的 App 根本不声明 CFBundleIconFile
+  }
+  try {
+    for (const file of fs.readdirSync(resDir)) {
+      if (file.endsWith('.icns')) found.push(path.join(resDir, file));
+    }
+  } catch (e) {}
+  return found.filter(p => { try { return fs.statSync(p).isFile(); } catch (e) { return false; } });
+}
+
+// 判断一张图标是不是「灰度/掩膜版」：现代 App（Chrome、微信…）把彩色图标放在
+// Assets.car 里，.icns 只剩一张黑白 mask，直接转出来会是灰图。
+function looksMonochrome(file) {
+  try {
+    const img = nativeImage.createFromPath(file);
+    if (img.isEmpty()) return true;
+    const { width, height } = img.getSize();
+    if (!width || !height) return true;
+    const buf = img.toBitmap(); // BGRA
+    let colored = 0;
+    let sampled = 0;
+    for (let i = 0; i < buf.length; i += 4 * 7) {
+      const b = buf[i], g = buf[i + 1], r = buf[i + 2], a = buf[i + 3];
+      if (a < 24) continue;
+      sampled++;
+      if (Math.abs(r - g) > 10 || Math.abs(g - b) > 10 || Math.abs(r - b) > 10) colored++;
+    }
+    if (!sampled) return true;
+    return colored / sampled < 0.02; // 彩色像素不到 2% 就当灰度
+  } catch (e) {
+    return true;
+  }
+}
+
+// 用 NSWorkspace 取真彩图标（走 Assets.car，JXA 启动约 1s，所以只在必要时用）
+function extractIconViaNSWorkspace(appPath, dest) {
+  const tmp = path.join(os.tmpdir(), `ch-icon-${Date.now()}-${Math.random().toString(36).slice(2)}.png`);
+  const script = `ObjC.import('Cocoa');
+const icon = $.NSWorkspace.sharedWorkspace.iconForFile(${JSON.stringify(appPath)});
+icon.setSize($.NSMakeSize(256, 256));
+const rep = $.NSBitmapImageRep.imageRepWithData(icon.TIFFRepresentation);
+rep.representationUsingTypeProperties($.NSBitmapImageFileTypePNG, $({})).writeToFileAtomically(${JSON.stringify(tmp)}, true);`;
+  try {
+    execFileSync('/usr/bin/osascript', ['-l', 'JavaScript', '-e', script], { timeout: 8000, stdio: 'ignore' });
+    if (!fs.existsSync(tmp)) return false;
+    execFileSync('/usr/bin/sips', ['-Z', '64', tmp, '--out', dest], { timeout: 8000, stdio: 'ignore' });
+    fs.unlinkSync(tmp);
+    return fs.existsSync(dest) && fs.statSync(dest).size > 0;
+  } catch (e) {
+    return false;
+  }
+}
+
+// 抓 App 图标成 64px PNG 缓存；成功返回 true
+async function ensureSourceIcon(source) {
+  if (!source || !source.bundleId) return false;
+  const file = sourceIconFile(source);
+  if (!file) return false;
+  if (store.iconCache.has(file)) return false;
+  if (!source.path || !fs.existsSync(source.path)) return false;
+  if (pendingIcons.has(file)) return false;
+
+  const dest = path.join(store.sourcesDir, file);
+  pendingIcons.add(file);
+  try {
+    fs.mkdirSync(store.sourcesDir, { recursive: true });
+
+    // 1) .icns 直接转，最快；但只有真彩图标才算成功
+    for (const icns of appIconCandidates(source.path)) {
+      try {
+        execFileSync('/usr/bin/sips', ['-s', 'format', 'png', icns, '--out', dest, '-Z', '64'], { timeout: 3000 });
+        if (fs.existsSync(dest) && fs.statSync(dest).size > 0 && !looksMonochrome(dest)) {
+          store.iconCache.add(file);
+          return true;
+        }
+      } catch (e) {
+        // 换下一个候选
+      }
+    }
+
+    // 2) 退回 NSWorkspace（Assets.car 里的彩色图标）
+    if (extractIconViaNSWorkspace(source.path, dest)) {
+      store.iconCache.add(file);
+      return true;
+    }
+
+    // 3) 最后用 Electron 自带的（可能是灰阶），只在还没有文件时兜底
+    if (!fs.existsSync(dest)) {
+      const img = await app.getFileIcon(source.path, { size: 'normal' });
+      if (!img.isEmpty()) {
+        const big = img.resize({ width: 64, height: 64, quality: 'best' });
+        fs.writeFileSync(dest, big.toPNG());
+        store.iconCache.add(file);
+        return true;
+      }
+    }
+    return false;
+  } catch (e) {
+    return false;
+  } finally {
+    pendingIcons.delete(file);
+  }
+}
+
 // 传给渲染进程的字段（不含 base64 大图）
 function publicItem(item) {
   return {
@@ -280,7 +457,9 @@ function publicItem(item) {
     width: item.width || 0,
     height: item.height || 0,
     bytes: item.bytes || 0,
-    thumbUrl: item.thumb ? `${IMAGE_SCHEME}://img/${encodeURIComponent(item.thumb)}` : ''
+    thumbUrl: item.thumb ? `${IMAGE_SCHEME}://img/${encodeURIComponent(item.thumb)}` : '',
+    source: item.source || null,
+    sourceIcon: sourceIconUrl(item.source)
   };
 }
 
@@ -388,7 +567,14 @@ function toggleWindow() {
 }
 
 // ============ 历史记录 ============
-function addTextItem(text) {
+function refreshSourceIcon(source) {
+  if (!source) return;
+  ensureSourceIcon(source).then(ok => {
+    if (ok && mainWindow && mainWindow.isVisible()) sendHistory();
+  }).catch(() => {});
+}
+
+async function addTextItem(text, source) {
   const truncated = Buffer.byteLength(text, 'utf8') > MAX_TEXT_BYTES;
   const content = truncated
     ? Buffer.from(text, 'utf8').subarray(0, MAX_TEXT_BYTES).toString('utf8')
@@ -401,14 +587,16 @@ function addTextItem(text) {
     preview: content.length > 200 ? content.slice(0, 200) : content,
     timestamp: Date.now(),
     length: text.length,
-    truncated
+    truncated,
+    source: source || null
   };
   const added = store.add(item);
   if (mainWindow && mainWindow.isVisible()) sendHistory();
+  refreshSourceIcon(source);
   return added;
 }
 
-function addImageItem(buf) {
+async function addImageItem(buf, source) {
   const saved = saveImageFiles(buf);
   if (!saved) return null;
   const item = {
@@ -421,10 +609,12 @@ function addImageItem(buf) {
     height: saved.height,
     file: saved.file,
     thumb: saved.thumb,
-    preview: `${saved.width} × ${saved.height}`
+    preview: `${saved.width} × ${saved.height}`,
+    source: source || null
   };
   const added = store.add(item);
   if (mainWindow && mainWindow.isVisible()) sendHistory();
+  refreshSourceIcon(source);
   return added;
 }
 
@@ -451,7 +641,8 @@ function startClipboardWatcher() {
 
       if (textHash && textHash !== lastTextHash) {
         lastTextHash = textHash;
-        addTextItem(text);
+        const source = captureSourceApp();
+        addTextItem(text, source).catch(e => console.error('addTextItem:', e));
         return;
       }
       if (textHash) return; // 有文本时不再检查图片，避免影响文本复制
@@ -464,7 +655,8 @@ function startClipboardWatcher() {
       const hash = sha1(buf);
       if (hash === lastImageHash) return;
       lastImageHash = hash;
-      addImageItem(buf);
+      const source = captureSourceApp();
+      addImageItem(buf, source).catch(e => console.error('addImageItem:', e));
     } catch (e) {
       console.error('Clipboard watch error:', e);
     }
@@ -890,8 +1082,19 @@ function rebuildTrayMenu() {
 function setupImageProtocol() {
   protocol.handle(IMAGE_SCHEME, (request) => {
     try {
-      const name = decodeURIComponent(new URL(request.url).pathname.replace(/^\/+/, ''));
+      const url = new URL(request.url);
+      const host = url.host;
+      const name = decodeURIComponent(url.pathname.replace(/^\/+/, ''));
       const safe = path.basename(name);
+      if (host === 'src') {
+        if (!/^src-[A-Za-z0-9]+\.png$/.test(safe)) {
+          return new Response('Bad request', { status: 400 });
+        }
+        const data = fs.readFileSync(path.join(store.sourcesDir, safe));
+        return new Response(data, {
+          headers: { 'content-type': 'image/png', 'cache-control': 'max-age=86400' }
+        });
+      }
       if (!/^[A-Za-z0-9-]+(\.thumb)?\.png$/.test(safe)) {
         return new Response('Bad request', { status: 400 });
       }

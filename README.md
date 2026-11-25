@@ -12,6 +12,7 @@
 - 📋 自动监听剪贴板（文本 + 图片），自动去重
 - 🔍 关键字搜索
 - ⌨️ 全键盘操作（← → 切换、Enter 粘贴、1-9 直选、⌘C 复制、Delete 删除、⌘F 搜索、Esc 关闭）
+- 🏷 每条记录都带**来源 App 图标**（微信 / Chrome / 终端…），搜索也能按 App 名过滤
 - 💾 持久化存储，最多 200 条：元数据 JSON + 图片独立文件，原子写盘带 `.bak` 兜底
 - ✨ 毛玻璃 vibrancy + 横向滑动卡片
 - 🍎 隐藏 Dock 图标，仅菜单栏 📋 常驻
@@ -98,6 +99,8 @@ npm start
 | Esc | 关闭窗口 |
 | 右键卡片 | 删除该项 |
 
+卡片左上角的小图标就是这条内容的来源 App；搜索框里直接输入 App 名（比如「微信」）就能只看它复制出来的内容。
+
 ## 🍎 菜单栏（点击 📋）
 
 - 显示 Clipboard (⇧⌘V)
@@ -168,6 +171,7 @@ npm run package      # 打包生成 .app（输出到 dist/）
 - [Electron 28](https://www.electronjs.org/) — Chromium + Node 跨平台框架
 - [@electron/packager](https://github.com/electron/packager) — 打包工具
 - macOS vibrancy + `LSUIElement`（无 Dock 图标）
+- 来源识别：`lsappinfo` 读当前前台 App 的 bundle id 与 `.app` 路径（不需要辅助功能权限），图标用 `sips` 从 `.icns` 转 PNG 缓存到 `sources/`
 - 本地持久化：`~/Library/Application Support/Clipboard/clipboard-history.json` 存元数据，同目录 `images/` 存原图与 480px 缩略图（自定义 `ch-image://` 协议按需加载缩略图，不再把 base64 塞进 JSON）
 - `app.setLoginItemSettings` 实现开机自启
 

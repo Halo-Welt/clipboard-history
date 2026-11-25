@@ -21,6 +21,10 @@
   --kbd-border: rgba(0, 0, 0, 0.08);
   --img-bg: rgba(0, 0, 0, 0.03);
   --badge: rgba(0, 0, 0, 0.5);
+  --src-bg: rgba(255, 255, 255, 0.85);
+  --src-border: rgba(0, 0, 0, 0.10);
+  --src-fallback-bg: rgba(0, 0, 0, 0.06);
+  --src-fallback-text: rgba(60, 60, 67, 0.62);
 }
 
 @media (prefers-color-scheme: dark) {
@@ -42,6 +46,10 @@
     --kbd-border: rgba(255, 255, 255, 0.12);
     --img-bg: rgba(255, 255, 255, 0.04);
     --badge: rgba(235, 235, 245, 0.6);
+    --src-bg: rgba(255, 255, 255, 0.9);
+    --src-border: rgba(255, 255, 255, 0.16);
+    --src-fallback-bg: rgba(255, 255, 255, 0.12);
+    --src-fallback-text: rgba(235, 235, 245, 0.7);
   }
 }
 
@@ -210,10 +218,55 @@ html, body {
 .card-head {
   display: flex;
   align-items: center;
-  justify-content: space-between;
+  justify-content: flex-start;
   gap: 6px;
   padding: 9px 11px 0;
   font-size: 10.5px;
+}
+
+/* 来源 App 图标：16px 圆角小方块，跟系统通知里的 App 图标一个尺寸 */
+.src {
+  width: 16px;
+  height: 16px;
+  flex-shrink: 0;
+  border-radius: 4px;
+  overflow: hidden;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--src-bg);
+  box-shadow: inset 0 0 0 0.5px var(--src-border);
+}
+
+.src img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
+.src.is-fallback {
+  background: var(--src-fallback-bg);
+}
+
+.src .src-fallback {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  height: 100%;
+  color: var(--src-fallback-text);
+}
+
+.src .src-fallback svg {
+  width: 11px;
+  height: 11px;
+  display: block;
+}
+
+/* 时间靠右，来源图标留在左边跟类型标签一起 */
+.card-head .time {
+  margin-left: auto;
 }
 
 .badge {

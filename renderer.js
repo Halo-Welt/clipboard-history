@@ -54,6 +54,34 @@ function updateStatus() {
   }
 }
 
+// 来源 App 的小图标（Paste 那种「卡片上能看到这条是从哪个 App 复制的」）
+function buildSourceChip(item) {
+  const chip = document.createElement('span');
+  chip.className = 'src';
+  const src = item.source;
+  if (src && src.name) chip.title = src.name;
+
+  if (item.sourceIcon) {
+    const img = document.createElement('img');
+    img.src = item.sourceIcon;
+    img.alt = src ? src.name : '';
+    img.loading = 'lazy';
+    img.draggable = false;
+    chip.appendChild(img);
+    return chip;
+  }
+
+  // 没有图标（老记录 / 系统进程 / 取图标失败）时退回一个通用 App 轮廓
+  const fallback = document.createElement('span');
+  fallback.className = 'src-fallback';
+  fallback.innerHTML = '<svg viewBox="0 0 16 16" aria-hidden="true">' +
+    '<rect x="2.75" y="2.75" width="10.5" height="10.5" rx="3.25" fill="none" ' +
+    'stroke="currentColor" stroke-width="1.25"/><circle cx="8" cy="8" r="1.7" fill="currentColor"/></svg>';
+  chip.appendChild(fallback);
+  chip.classList.add('is-fallback');
+  return chip;
+}
+
 function buildCard(item, index) {
   const type = detectType(item);
   const card = document.createElement('div');
@@ -63,6 +91,8 @@ function buildCard(item, index) {
 
   const head = document.createElement('div');
   head.className = 'card-head';
+  head.append(buildSourceChip(item));
+
   const badge = document.createElement('span');
   badge.className = 'badge';
   badge.textContent = TYPE_LABEL[type];
@@ -159,9 +189,14 @@ function setSelection(id, { scroll = true } = {}) {
 
 function applyFilter(preferredIndex) {
   const kw = searchKeyword.trim().toLowerCase();
+  // 搜索同时匹配内容与来源 App 名（搜「微信」「Chrome」也能过滤）
   filtered = !kw
     ? items.slice()
-    : items.filter(item => item.type !== 'image' && (item.content || '').toLowerCase().includes(kw));
+    : items.filter(item => {
+        const inContent = item.type !== 'image' && (item.content || '').toLowerCase().includes(kw);
+        const inSource = (item.source && item.source.name || '').toLowerCase().includes(kw);
+        return inContent || inSource;
+      });
 
   if (!filtered.some(item => item.id === selectedId)) {
     const idx = typeof preferredIndex === 'number'

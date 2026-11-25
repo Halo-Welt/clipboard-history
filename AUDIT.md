@@ -82,3 +82,23 @@ P0 改造对现有 `clipboard-history.json` 兼容：第一次启动时做一次
 - **打包/安装**：`build/package.js` 图标改为 `path.join(__dirname, 'icon.icns')`（产物 `Resources/electron.icns` 内容已核对为自绘图标，哈希一致；`.icon` 警告来自 Icon Composer 新格式探测，可忽略）；
   `install.sh` 的 pkill 收窄到应用二进制路径，启动改为 `env -u ELECTRON_RUN_AS_NODE open ...`。
 - **仍待办**：签名/公证（19/20 之外）、自动更新替换的校验与回滚、Electron 28 升级、测试/lint/CI。
+
+---
+
+## ✅ v1.4.0 新增：剪贴板来源 App（2026-11-25）
+
+- **取来源**：每次检测到剪贴板变化时调 `captureSourceApp()`，用 `/usr/bin/lsappinfo front` + `lsappinfo info -only name,bundleID,bundlepath`
+  读当前前台 App。`lsappinfo` 是 Launch Services 自带工具：**不需要辅助功能权限**、不弹窗，实测两次 spawn 合计约 7ms（只在内容变化时调用，不是每 tick）。
+  `com.liuxinyu.clipboard-history`（自己）会被忽略，避免从应用内复制时记成自己。
+- **图标缓存**：`ensureSourceIcon()` 把 App 图标抓成 64px PNG 存 `userData/sources/src-<sha1(bundleId)[0:16]>.png`。
+  三级策略：① `sips` 直接把 bundle 里的 `.icns` 转 PNG（约 20ms，绝大多数 App 够用）；② `.icns` 只有灰度 mask 时（现代 App 把彩色图标放 `Assets.car`），
+  退回 `osascript -l JavaScript` 调 `NSWorkspace.iconForFile`（约 350–1000ms，走资源目录里的彩色图标）；③ 最后兜底 `app.getFileIcon`。
+  抓取是 fire-and-forget：条目先入库、卡片先显示通用占位，图标好了再推一次 `sendHistory()`；`pendingIcons` 防止同一 App 并发抓取重复起进程。
+- **协议**：`ch-image://src/<file>` 走同一个 `protocol.handle`，白名单 `^src-[A-Za-z0-9]+\.png$`，`cache-control: max-age=86400`（图标不会变）。
+- **数据**：条目新增 `source: { bundleId, name, path }`；同 hash 重复复制时用最新的来源覆盖旧来源；老条目没有 source 时渲染通用 App 轮廓图标。
+- **渲染**：卡片左上角 16px 圆角小图标（`app.getFileIcon` 量级的尺寸，跟系统通知一致），`title` 显示 App 名；搜索框同时匹配来源 App 名（搜「微信」「Chrome」可直接过滤）。
+- 实测：Chrome / 微信 / 备忘录 / 终端 图标均正确取到真彩版本并缓存；复制时来源记录正确。
+
+### 与 Paste 的差距（对照见 README 讨论）
+Paste 有 Pinboard（收藏板）、iCloud 跨设备同步、Apple Intelligence 预测下一条、MCP 供 AI 读取剪贴板、忽略密码类 App 的隐私规则、富内容类型（文件/颜色/富文本）。
+本项目定位是「零依赖、本地、单机快捷键工具」，下一步优先级建议：**Pin 收藏** → **忽略 App 规则** → **文件/颜色类型** → 同步（可选 iCloud）。
